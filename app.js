@@ -8,7 +8,7 @@ import { initializeApp } from "https://www.gstatic.com/firebasejs/10.7.1/firebas
 import { getAuth, signInAnonymously, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-auth.js";
 import { initializeFirestore, collection, doc, setDoc, onSnapshot, getDocs, persistentLocalCache, persistentMultipleTabManager } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js";
 import { CHECKLIST_CATEGORIES, LUGGAGE_META, CHECKLIST_TEMPLATE } from './checklist-data.js';
-import { ASA_SD_2026_TRIP_DEFAULTS, ASA_SD_2026_ITINERARY, ASA_SD_2026_POSTER } from './asa-trip-template.js';
+import { ASA_SD_2026_TRIP_DEFAULTS, ASA_SD_2026_ITINERARY, ASA_SD_2026_POSTER, ASA_SD_2026_FLIGHTS } from './asa-trip-template.js';
 
 createApp({
     setup() {
@@ -55,6 +55,7 @@ createApp({
         const savedLocations = ref([]);
         const expenses = ref([]);
         const checklist = ref([]);
+        const bookings = ref([]); // 訂位/票券總表：hotel / flight / restaurant / ticket / other，見「口袋名單」下方新增的 bookingModal
         const collapsedCats = reactive({});
         const participants = ref([]);
         const participantsStr = ref('');
@@ -155,7 +156,14 @@ createApp({
             if (toastTimer) { clearTimeout(toastTimer); toastTimer = null; }
         };
 
-        const toggleFlightCard = () => { if (currentDay.value.flight) { } else { currentDay.value.flight = { type: 'arrival', startTime: '10:00', startAirport: 'TPE', number: '', endTime: '14:00', endAirport: 'DEST', arrivalOffset: 0 }; editingState.flight = true; } };
+        // ---- 航班：一段航程（去程/回程）可以有多個航班段（轉機）；掛在建立時所在那一天的 day.flight ----
+        // 任何旅程的任何一天都可以用，不是 ASA 專屬；ASA 範本只是預先帶入一份資料（見 asa-trip-template.js）
+        const createFlightSegment = () => ({
+            id: generateId(), airline: '', flightNumber: '', departureAirport: '', arrivalAirport: '',
+            departureDateTime: '', arrivalDateTime: '', departureTerminal: '', arrivalTerminal: '',
+            confirmationNumber: '', notes: ''
+        });
+        const toggleFlightCard = () => { if (!currentDay.value.flight) { currentDay.value.flight = { id: generateId(), label: '', segments: [createFlightSegment()] }; editingState.flight = true; } };
         const removeFlight = () => {
             const day = days.value[currentDayIdx.value];
             if (!day || !day.flight) return;
@@ -163,6 +171,62 @@ createApp({
             day.flight = null;
             editingState.flight = false;
             showToast('已移除航班資訊', { icon: 'ph-bold ph-trash', undo: () => { day.flight = removed; } });
+        };
+        const addFlightSegment = (journey) => { if (journey) journey.segments.push(createFlightSegment()); };
+        const removeFlightSegment = (journey, segId) => {
+            if (!journey) return;
+            const idx = journey.segments.findIndex(s => s.id === segId);
+            if (idx === -1) return;
+            const removed = journey.segments.splice(idx, 1)[0];
+            showToast('已刪除航班段', { icon: 'ph-bold ph-trash', undo: () => { journey.segments.splice(Math.min(idx, journey.segments.length), 0, removed); } });
+        };
+        const moveFlightSegment = (journey, segId, dir) => {
+            if (!journey) return;
+            const arr = journey.segments;
+            const idx = arr.findIndex(s => s.id === segId);
+            const target = idx + dir;
+            if (idx === -1 || target < 0 || target >= arr.length) return;
+            [arr[idx], arr[target]] = [arr[target], arr[idx]];
+        };
+        // datetime-local 值固定是 "YYYY-MM-DDTHH:mm"，直接切片取時間/日期即可，不需要額外解析
+        const formatFlightTime = (dt) => dt ? dt.slice(11, 16) : '--:--';
+        const isNextDayArrival = (dep, arr) => !!(dep && arr && dep.slice(0, 10) !== arr.slice(0, 10));
+        // 簡單轉機時間計算：兩個 datetime-local 字串直接相減；資料不全或算出負值就不顯示，改讓使用者自己寫在 notes
+        const formatLayover = (arrPrev, depNext) => {
+            if (!arrPrev || !depNext) return '';
+            const a = new Date(arrPrev), b = new Date(depNext);
+            if (isNaN(a) || isNaN(b)) return '';
+            const diffMin = Math.round((b - a) / 60000);
+            if (diffMin <= 0) return '';
+            const h = Math.floor(diffMin / 60), m = diffMin % 60;
+            return `轉機 ${h > 0 ? h + ' 小時 ' : ''}${m} 分鐘`;
+        };
+        // 確認碼預設遮蔽：裝置本地、不落 Firestore，每次重新整理都會重新蓋住
+        const revealedFlightConfirmations = reactive({});
+        const toggleFlightConfirmation = (segId) => { revealedFlightConfirmations[segId] = !revealedFlightConfirmations[segId]; };
+        const maskConfirmation = () => '••••••';
+        const shiftDateStr = (dateStr, offsetDays) => {
+            if (!dateStr || !offsetDays) return dateStr;
+            const [y, m, d] = dateStr.split('-').map(Number);
+            const dt = new Date(y, m - 1, d + offsetDays);
+            const mm = dt.getMonth() + 1, dd = dt.getDate(), yyyy = dt.getFullYear();
+            return `${yyyy}-${mm < 10 ? '0' + mm : mm}-${dd < 10 ? '0' + dd : dd}`;
+        };
+        // 舊版單航段格式（{type,startTime,startAirport,number,endTime,endAirport,arrivalOffset}）→ 新的多航段格式；資料不遺失
+        const migrateFlightToSegments = (day) => {
+            const old = day.flight;
+            if (!old || old.segments) return; // 已是新格式或沒有航班資料
+            day.flight = {
+                id: generateId(),
+                label: old.type === 'departure' ? '回程' : (old.type === 'arrival' ? '去程' : ''),
+                segments: [{
+                    id: generateId(), airline: '', flightNumber: old.number || '',
+                    departureAirport: old.startAirport || '', arrivalAirport: old.endAirport || '',
+                    departureDateTime: (day.fullDate && old.startTime) ? `${day.fullDate}T${old.startTime}` : '',
+                    arrivalDateTime: (day.fullDate && old.endTime) ? `${shiftDateStr(day.fullDate, old.arrivalOffset || 0)}T${old.endTime}` : '',
+                    departureTerminal: '', arrivalTerminal: '', confirmationNumber: '', notes: ''
+                }]
+            };
         };
         const getDotColor = (t) => { if (t === 'food') return 'bg-orange-400 border-orange-100 ring-2 ring-orange-50'; if (t === 'shop') return 'bg-pink-400 border-pink-100 ring-2 ring-pink-50'; if (t === 'transport' || t === 'flight') return 'bg-blue-500 border-blue-100 ring-2 ring-blue-50'; if (t === 'hotel') return 'bg-indigo-400 border-indigo-100 ring-2 ring-indigo-50'; if (t === 'conference') return 'bg-violet-500 border-violet-100 ring-2 ring-violet-50'; return 'bg-primary-500 border-primary-100 ring-2 ring-primary-50'; };
         const updateParticipants = () => { participants.value = participantsStr.value.split(',').map(s => s.trim()).filter(s => s); };
@@ -222,7 +286,7 @@ createApp({
                 if (!locModal.draft.type) locModal.draft.type = 'spot';
             } else {
                 locModal.mode = 'add'; locModal.targetId = null;
-                locModal.draft = { id: generateId(), name: '', type: 'spot', link: '', note: '' };
+                locModal.draft = { id: generateId(), name: '', type: 'spot', link: '', note: '', prefs: {} };
             }
             locModal.show = true;
             if (!loc) nextTick(() => { document.querySelector('.js-loc-name')?.focus(); });
@@ -230,7 +294,9 @@ createApp({
         const saveLocModal = () => {
             if (locModal.mode === 'edit') {
                 const target = savedLocations.value.find(l => l.id === locModal.targetId);
-                if (target) Object.assign(target, locModal.draft);
+                // prefs 是各旅伴直接點卡片上的按鈕存的（見 setLocPref），不透過這個編輯彈窗；
+                // 排除它再 assign，避免拿彈窗打開當下的舊快照蓋掉旅伴同時按的偏好
+                if (target) { const { prefs, ...rest } = locModal.draft; Object.assign(target, rest); }
             } else {
                 savedLocations.value.push({ ...locModal.draft });
             }
@@ -242,6 +308,37 @@ createApp({
             if (idx === -1) return;
             const removed = savedLocations.value.splice(idx, 1)[0];
             showToast('已刪除地點', { icon: 'ph-bold ph-trash', undo: () => { savedLocations.value.splice(Math.min(idx, savedLocations.value.length), 0, removed); } });
+        };
+
+        // ---- 口袋名單偏好：地點本身共用，偏好依成員分開存在 loc.prefs[member]（不是投票/排行，只顯示各自意見）----
+        // member 沿用專案既有識別方式（participants 的顯示名稱字串），跟記帳 payer、清單 checkedBy 是同一套 key，
+        // 「目前是誰」沿用 activeChecklistMember（見旅遊清單）：同一裝置在整趟旅程只需選一次身份。
+        const LOC_PREF_ORDER = ['want', 'maybe', 'no'];
+        const LOC_PREF_META = {
+            want: { label: '想去', emoji: '❤️', activeClass: 'bg-primary-500 border-primary-500 text-white', chipClass: 'bg-primary-50 text-primary-700 border border-primary-100' },
+            maybe: { label: '備案', emoji: '🤔', activeClass: 'bg-amber-400 border-amber-400 text-white', chipClass: 'bg-amber-50 text-amber-700 border border-amber-100' },
+            no: { label: '不想去', emoji: '🙅', activeClass: 'bg-stone-500 border-stone-500 text-white', chipClass: 'bg-stone-100 text-stone-500 border border-stone-200' },
+        };
+        // 點同一個偏好再點一次＝取消標記（回到「尚未標記」，不是投票不能反悔）
+        const setLocPref = (loc, member, value) => {
+            if (!member) return;
+            if (!loc.prefs) loc.prefs = {};
+            if (loc.prefs[member] === value) delete loc.prefs[member];
+            else loc.prefs[member] = value;
+        };
+        // 其他旅伴的偏好摘要（含尚未標記），排除目前這個人自己
+        const otherMemberPrefs = (loc) => checklistMembers.value
+            .filter(m => m !== activeChecklistMember.value)
+            .map(m => ({ member: m, pref: loc.prefs?.[m] || null }));
+        // 共識提示：全部人都 want → 建議排入；有人 no → 需討論；有人 maybe（無 no）→ 可列備案；其餘（尚無人/部分尚未標記）不顯示
+        const locConsensus = (loc) => {
+            const members = checklistMembers.value;
+            const voted = members.filter(m => loc.prefs?.[m]);
+            if (!voted.length) return null;
+            if (voted.some(m => loc.prefs[m] === 'no')) return { text: '有人不想去，需討論', cls: 'bg-stone-100 text-stone-600' };
+            if (voted.some(m => loc.prefs[m] === 'maybe')) return { text: '有備案意見，可列為備案', cls: 'bg-amber-50 text-amber-700' };
+            if (voted.length === members.length) return { text: '大家都想去，建議排入行程', cls: 'bg-primary-50 text-primary-700' };
+            return null; // 目前都是 want，但還有人沒標記，先不下結論
         };
 
         // ---- 開新旅程：Blank Trip / ASA San Diego 2026 Template（僅在建立新旅程時可選，不影響既有旅程）----
@@ -265,10 +362,14 @@ createApp({
             return built;
         };
         // 可重複使用的範本函式：把 ASA_SD_2026_ITINERARY 純資料展開成 days.value 需要的格式
+        // 把範本裡沒有 id 的 journey/segments 補上 id，跟 seedChecklist 的套路一致
+        const buildFlightJourney = (tpl) => ({ id: generateId(), label: tpl.label, segments: tpl.segments.map(s => ({ id: generateId(), ...s })) });
         const seedAsaSanDiego2026Days = () => {
             const dNames = ['日', '一', '二', '三', '四', '五', '六'];
             const itemsByDate = {};
             ASA_SD_2026_ITINERARY.forEach(entry => { (itemsByDate[entry.date] = itemsByDate[entry.date] || []).push(entry); });
+            const flightsByDate = {};
+            [ASA_SD_2026_FLIGHTS.outbound, ASA_SD_2026_FLIGHTS.return].forEach(j => { flightsByDate[j.date] = j; });
             const [ny, nm, nd] = ASA_SD_2026_TRIP_DEFAULTS.startDate.split('-').map(Number);
             const start = new Date(ny, nm - 1, nd);
             const built = [];
@@ -284,13 +385,13 @@ createApp({
                     items: (itemsByDate[fullDate] || []).map(e => ({
                         id: generateId(), time: e.time, type: e.type, activity: e.activity, location: '', link: '', note: e.note || ''
                     })),
-                    flight: null
+                    flight: flightsByDate[fullDate] ? buildFlightJourney(flightsByDate[fullDate]) : null
                 });
             }
             return built;
         };
         const seedAsaSanDiego2026Poster = () => ({
-            id: generateId(), name: ASA_SD_2026_POSTER.name, type: ASA_SD_2026_POSTER.type, link: '', note: ASA_SD_2026_POSTER.note
+            id: generateId(), name: ASA_SD_2026_POSTER.name, type: ASA_SD_2026_POSTER.type, link: '', note: ASA_SD_2026_POSTER.note, prefs: {}
         });
         const useAsaSanDiego2026Template = () => {
             newTripUseAsaTemplate.value = true;
@@ -311,21 +412,38 @@ createApp({
         };
         const checklistMembers = computed(() => participants.value.length ? participants.value : ['__shared__']);
         const memberLabel = (m) => m === '__shared__' ? '' : m;
-        // 目前操作角色：裝置本地偏好（不落 Firestore）；成員名單變動時 fallback 回第一位
-        const activeChecklistMember = ref(localStorage.getItem('wetravel_active_checklist_member') || '');
-        watch(checklistMembers, (ms) => {
-            if (!ms.includes(activeChecklistMember.value)) activeChecklistMember.value = ms[0];
-        }, { immediate: true });
-        watch(activeChecklistMember, (v) => { if (v) localStorage.setItem('wetravel_active_checklist_member', v); });
+        // 「我是誰」：裝置本地偏好，依旅程分開存（不落 Firestore，不會被旅伴看到或蓋掉）。
+        // 只有在「有多個成員可選」時才需要使用者主動選一次；只有一個選項（單人旅程 / __shared__）就直接帶入，不用問。
+        const activeChecklistMember = ref('');
+        const checklistMemberStorageKey = () => currentTripId.value ? `wetravel_checklist_member_${currentTripId.value}` : null;
+        const loadActiveChecklistMember = () => {
+            const members = checklistMembers.value;
+            const key = checklistMemberStorageKey();
+            const saved = key ? localStorage.getItem(key) : '';
+            if (saved && members.includes(saved)) { activeChecklistMember.value = saved; }
+            else if (members.length === 1) { activeChecklistMember.value = members[0]; }
+            else { activeChecklistMember.value = ''; } // 尚未選擇，畫面會顯示「這是誰的清單？」
+        };
+        watch(currentTripId, loadActiveChecklistMember, { immediate: true });
+        watch(checklistMembers, () => {
+            if (activeChecklistMember.value && !checklistMembers.value.includes(activeChecklistMember.value)) loadActiveChecklistMember();
+            else if (!activeChecklistMember.value && checklistMembers.value.length === 1) activeChecklistMember.value = checklistMembers.value[0];
+        });
+        // 選擇/切換身份：只影響「我在這台裝置上是誰」，不會顯示或動到旅伴的勾選狀態
+        const chooseChecklistMember = (m) => {
+            activeChecklistMember.value = m;
+            const key = checklistMemberStorageKey();
+            if (key) localStorage.setItem(key, m);
+        };
         const toggleCheck = (item, member) => {
             if (!item.checkedBy) item.checkedBy = {};
             item.checkedBy[member] = !item.checkedBy[member];
         };
-        const checklistProgress = computed(() => checklistMembers.value.map(m => ({
-            member: m,
-            done: checklist.value.filter(i => i.checkedBy && i.checkedBy[m]).length,
+        // 只算「目前這個人」自己的總進度，不列出其他成員，避免看到旅伴打包了多少
+        const myChecklistProgress = computed(() => ({
+            done: checklist.value.filter(i => i.checkedBy && i.checkedBy[activeChecklistMember.value]).length,
             total: checklist.value.length
-        })));
+        }));
         // 分類進度跟著目前選中角色算（多人並排時代曾是「全員勾完才算」，已廢）
         const checklistByCategory = computed(() => CHECKLIST_CATEGORIES
             .map(cat => {
@@ -419,6 +537,47 @@ createApp({
             const removed = expenses.value.splice(idx, 1)[0];
             showToast('已刪除支出', { icon: 'ph-bold ph-trash', undo: () => { expenses.value.splice(Math.min(idx, expenses.value.length), 0, removed); } });
         };
+
+        // ---- 訂位與票券總表（Bookings）：集中管理飯店/航班/餐廳訂位/票券，跟 itinerary/expenses 是各自獨立的資料，互不影響 ----
+        const BOOKING_TYPE_META = {
+            hotel: { label: '飯店', icon: 'ph-bold ph-bed' },
+            flight: { label: '航班', icon: 'ph-bold ph-airplane-tilt' },
+            restaurant: { label: '餐廳訂位', icon: 'ph-bold ph-fork-knife' },
+            ticket: { label: '票券', icon: 'ph-bold ph-ticket' },
+            other: { label: '其他', icon: 'ph-bold ph-bookmark-simple' },
+        };
+        const bookingModal = reactive({ show: false, mode: 'add', targetId: null, draft: null });
+        const openBookingModal = (b = null) => {
+            if (b) {
+                bookingModal.mode = 'edit'; bookingModal.targetId = b.id;
+                bookingModal.draft = JSON.parse(JSON.stringify(b));
+            } else {
+                bookingModal.mode = 'add'; bookingModal.targetId = null;
+                bookingModal.draft = { id: generateId(), type: 'hotel', title: '', date: '', time: '', confirmationNumber: '', bookedBy: activeChecklistMember.value || '', cost: '', location: '', notes: '' };
+            }
+            bookingModal.show = true;
+            if (!b) nextTick(() => { document.querySelector('.js-booking-title')?.focus(); });
+        };
+        const saveBookingModal = () => {
+            if (bookingModal.mode === 'edit') {
+                const target = bookings.value.find(b => b.id === bookingModal.targetId);
+                if (target) Object.assign(target, bookingModal.draft);
+            } else {
+                bookings.value.push({ ...bookingModal.draft });
+            }
+            bookingModal.show = false;
+        };
+        const deleteBookingFromModal = () => {
+            bookingModal.show = false;
+            const idx = bookings.value.findIndex(b => b.id === bookingModal.targetId);
+            if (idx === -1) return;
+            const removed = bookings.value.splice(idx, 1)[0];
+            showToast('已刪除訂位/票券', { icon: 'ph-bold ph-trash', undo: () => { bookings.value.splice(Math.min(idx, bookings.value.length), 0, removed); } });
+        };
+        const sortedBookings = computed(() => [...bookings.value].sort((a, b) => `${a.date || ''}${a.time || ''}`.localeCompare(`${b.date || ''}${b.time || ''}`)));
+        // 確認碼/票券號碼預設遮蔽，跟航班段共用同一套遮蔽 UI 邏輯，但分開存避免 id 混淆
+        const revealedBookingConfirmations = reactive({});
+        const toggleBookingConfirmation = (bookingId) => { revealedBookingConfirmations[bookingId] = !revealedBookingConfirmations[bookingId]; };
         const updateExchangeRate = () => { if (setup.value) setup.value.rate = exchangeRate.value; };
 
         const getExternalMapLink = (loc) => { if (!loc) return '#'; if (isUrl(loc)) return loc; const encodedLoc = encodeURIComponent(loc); if (setup.value.mapProvider === 'naver') return `https://map.naver.com/v5/search/${encodedLoc}`; else if (setup.value.mapProvider === 'amap') return `https://www.amap.com/search?query=${encodedLoc}`; else return `https://www.google.com/maps/search/?api=1&query=${encodedLoc}`; };
@@ -508,6 +667,7 @@ createApp({
             participants.value = [];
             newExpense.value.payer = '';
             isRateLoading.value = false;
+            isSettingPasscode.value = false; passcodeDraftInput.value = '';
             nextTick(() => ignoreRemoteUpdate = false);
         };
 
@@ -539,15 +699,92 @@ createApp({
             joinTripUrl.value = '';
         };
 
+        // ---- Trip Passcode（MVP，前端驗證）--------------------------------------------------------
+        // ⚠️ 安全性說明：這不是伺服器端存取控制。firestore.rules 目前只檢查「是否已匿名登入」
+        // （見 firestore.rules `allow read: if request.auth != null`），任何知道 tripId、且完成匿名登入
+        // 的使用者，理論上仍可直接用 Firebase SDK / REST API 讀到整份 trip 文件（包含這裡存的 passcodeHash）。
+        // 這一層只是擋住「拿到分享連結但沒有密碼」的一般使用者，讓內容不會直接顯示在畫面上；
+        // 要做到真正的存取控制需要後端（例如 Cloud Functions 驗證後核發臨時權限），這個純前端 + GitHub
+        // Pages 架構沒有後端，所以先用這個當 MVP。密碼本身不明文存放：只存「亂數 salt + SHA-256 雜湊」。
+        const tripLocked = ref(false);
+        const passcodeInput = ref('');
+        const passcodeError = ref('');
+        const isUnlockingPasscode = ref(false);
+        const passcodeDraftInput = ref(''); // 設定/變更密碼用的草稿欄位；明文只存在這台裝置的記憶體，存檔前就雜湊掉
+        const isSettingPasscode = ref(false);
+        const unlockStorageKey = (tripId) => tripId ? `wetravel_trip_unlocked_${tripId}` : null;
+        const hashPasscode = async (passcode, salt) => {
+            const bytes = new TextEncoder().encode(`${salt || ''}:${passcode}`);
+            const digest = await crypto.subtle.digest('SHA-256', bytes);
+            return Array.from(new Uint8Array(digest)).map(b => b.toString(16).padStart(2, '0')).join('');
+        };
+        const generatePasscodeSalt = () => {
+            const arr = new Uint8Array(8);
+            crypto.getRandomValues(arr);
+            return Array.from(arr).map(b => b.toString(16).padStart(2, '0')).join('');
+        };
+        const evaluateTripLock = () => {
+            if (!setup.value.passcodeEnabled || !setup.value.passcodeHash) { tripLocked.value = false; return; }
+            const key = unlockStorageKey(currentTripId.value);
+            const savedHash = key ? localStorage.getItem(key) : null;
+            tripLocked.value = savedHash !== setup.value.passcodeHash;
+        };
+        watch([currentTripId, () => setup.value.passcodeEnabled, () => setup.value.passcodeHash], evaluateTripLock, { immediate: true });
+        watch(tripLocked, (locked) => { if (locked) { passcodeInput.value = ''; passcodeError.value = ''; } });
+        const unlockTrip = async () => {
+            passcodeError.value = '';
+            if (!passcodeInput.value) { passcodeError.value = '請輸入密碼'; return; }
+            isUnlockingPasscode.value = true;
+            try {
+                const hash = await hashPasscode(passcodeInput.value, setup.value.passcodeSalt);
+                if (hash === setup.value.passcodeHash) {
+                    const key = unlockStorageKey(currentTripId.value);
+                    if (key) localStorage.setItem(key, hash);
+                    tripLocked.value = false;
+                    passcodeInput.value = '';
+                } else {
+                    passcodeError.value = '密碼不正確，請再試一次';
+                }
+            } finally {
+                isUnlockingPasscode.value = false;
+            }
+        };
+        const openPasscodeEditor = () => { passcodeDraftInput.value = ''; isSettingPasscode.value = true; };
+        const cancelPasscodeEditor = () => { passcodeDraftInput.value = ''; isSettingPasscode.value = false; };
+        const removeTripPasscode = async () => {
+            const ok = await appConfirm('移除後，任何拿到分享連結的人都能直接看到這趟旅程的內容，確定嗎？', { title: '移除密碼保護', danger: true, confirmText: '移除' });
+            if (!ok) return;
+            setup.value.passcodeEnabled = false;
+            setup.value.passcodeHash = '';
+            setup.value.passcodeSalt = '';
+            isSettingPasscode.value = false;
+            passcodeDraftInput.value = '';
+            showToast('已移除密碼保護', { icon: 'ph-bold ph-lock-open' });
+        };
+        // 存旅程設定時呼叫：如果使用者有在密碼欄位打新密碼，雜湊後寫進 setup；沒打就維持原狀，不會誤清空
+        const applyPasscodeDraft = async () => {
+            if (!isSettingPasscode.value) return;
+            const val = passcodeDraftInput.value.trim();
+            if (!val) return;
+            const salt = generatePasscodeSalt();
+            setup.value.passcodeSalt = salt;
+            setup.value.passcodeHash = await hashPasscode(val, salt);
+            setup.value.passcodeEnabled = true;
+            passcodeDraftInput.value = '';
+            isSettingPasscode.value = false;
+        };
+
         let setupSnapshot = null;
 
         const openEditModal = () => {
+            if (tripLocked.value) { showToast('請先輸入密碼解鎖旅程', { icon: 'ph-bold ph-lock-key' }); return; }
             const currentTrip = tripList.value.find(t => t.id === currentTripId.value);
             if (currentTrip) setup.value.destination = currentTrip.destination;
             setup.value.days = days.value.length;
             if (days.value.length > 0 && days.value[0].fullDate) setup.value.startDate = days.value[0].fullDate;
             setupSnapshot = JSON.parse(JSON.stringify(setup.value));
             isRateLoading.value = false;
+            isSettingPasscode.value = false; passcodeDraftInput.value = '';
             isEditing.value = true; showSetupModal.value = true;
         };
 
@@ -558,11 +795,13 @@ createApp({
                 nextTick(() => ignoreRemoteUpdate = false);
             }
             setupSnapshot = null;
+            isSettingPasscode.value = false; passcodeDraftInput.value = '';
             showSetupModal.value = false;
         };
 
         const initTrip = async () => {
             if (!setup.value.destination) { showToast('請先填寫目的地', { icon: 'ph-bold ph-warning' }); return; }
+            await applyPasscodeDraft(); // 有打新密碼才會動 setup.passcodeHash/Salt/Enabled，沒打就不變
 
             if (isEditing.value && currentTripId.value) {
                 if (setup.value.destination) {
@@ -629,6 +868,7 @@ createApp({
             expenses.value = [];
             savedLocations.value = newTripUseAsaTemplate.value ? [seedAsaSanDiego2026Poster()] : [];
             checklist.value = seedChecklist();
+            bookings.value = [];
             exchangeRate.value = setup.value.rate;
             // 成員已在 setup modal 收好（createNewTrip 開窗時已重置過），此處不可清空
             if (!participants.value.includes(newExpense.value.payer)) newExpense.value.payer = participants.value[0] || '';
@@ -734,6 +974,7 @@ createApp({
                                     if (!item.id) item.id = generateId();
                                 });
                             }
+                            migrateFlightToSegments(day); // 舊版單航段航班 → 多航段格式
                         });
                     }
 
@@ -741,6 +982,7 @@ createApp({
                     expenses.value = data.expenses || [];
                     expenses.value.forEach(e => { if (e && !e.id) e.id = generateId(); });
                     savedLocations.value = (data.locations || []).filter(l => l);
+                    savedLocations.value.forEach(l => { if (!l.prefs) l.prefs = {}; });
 
                     // 舊旅程無 checklist → 空陣列（分頁顯示帶入模板的空狀態）；欄位缺漏防禦性補齊
                     checklist.value = (data.checklist || []).filter(i => i);
@@ -750,6 +992,9 @@ createApp({
                         if (!CHECKLIST_CATEGORIES.some(c => c.slug === i.category)) i.category = 'misc';
                         if (!LUGGAGE_META[i.luggage]) i.luggage = 'any';
                     });
+
+                    bookings.value = (data.bookings || []).filter(b => b);
+                    bookings.value.forEach(b => { if (!b.id) b.id = generateId(); });
 
                     // 初次載入自動跳到「今天」（若今天落在行程日期區間內），並把當天 chip 捲入視野
                     if (isFirstSnapshot) {
@@ -842,6 +1087,7 @@ createApp({
                         expenses: expenses.value,
                         locations: savedLocations.value,
                         checklist: JSON.parse(JSON.stringify(checklist.value)),
+                        bookings: JSON.parse(JSON.stringify(bookings.value)),
                         rate: exchangeRate.value,
                         users: participantsStr.value,
                         setup: setup.value,
@@ -861,7 +1107,7 @@ createApp({
             }, 1000);
         };
 
-        watch([days, expenses, savedLocations, checklist, exchangeRate, participantsStr, setup], () => {
+        watch([days, expenses, savedLocations, checklist, bookings, exchangeRate, participantsStr, setup], () => {
             if (!ignoreRemoteUpdate && !(showSetupModal.value && !isEditing.value)) debouncedSave();
         }, { deep: true });
 
@@ -938,6 +1184,8 @@ createApp({
         return {
             viewMode, currentDayIdx, days, currentDay, participants, participantsStr, updateParticipants,
             getExternalMapLink, removeFlight, addDay,
+            addFlightSegment, removeFlightSegment, moveFlightSegment, formatFlightTime, isNextDayArrival, formatLayover,
+            revealedFlightConfirmations, toggleFlightConfirmation, maskConfirmation,
             expenses, newExpense, totalExpense, addExpense,
             paidByPerson, exchangeRate,
             newParticipant, addParticipant, removeParticipant,
@@ -948,6 +1196,10 @@ createApp({
             showTripMenu, tripList, createNewTrip, switchTrip, archiveTrip, currentTripId,
             allTrips, allTripsStatus, showArchivedTrips, loadAllTrips, otherTrips, archivedTrips, adoptTrip, unarchiveTrip,
             openEditModal, cancelSetupModal, isEditing, mapProviderLabel, amountInputRef, isAmountInvalid, itemInputRef, isItemInvalid, isUrl,
+            tripLocked, passcodeInput, passcodeError, isUnlockingPasscode, unlockTrip,
+            passcodeDraftInput, isSettingPasscode, openPasscodeEditor, cancelPasscodeEditor, removeTripPasscode,
+            bookings, sortedBookings, BOOKING_TYPE_META, bookingModal, openBookingModal, saveBookingModal, deleteBookingFromModal,
+            revealedBookingConfirmations, toggleBookingConfirmation,
             editingState,
             savedLocations,
             updateRateByCurrency,
@@ -959,10 +1211,11 @@ createApp({
             dialog, dialogAnswer, toast, undoToast,
             itemModal, openItemModal, saveItemModal, deleteItemFromModal,
             locModal, openLocModal, saveLocModal, deleteLocFromModal,
+            LOC_PREF_ORDER, LOC_PREF_META, setLocPref, otherMemberPrefs, locConsensus,
             expModal, openExpModal, saveExpModal, deleteExpFromModal,
             checklist, collapsedCats, toggleCat, checklistMembers, memberLabel, toggleCheck,
-            activeChecklistMember,
-            checklistProgress, checklistByCategory, seedDefaultChecklist, resetChecklist,
+            activeChecklistMember, chooseChecklistMember,
+            myChecklistProgress, checklistByCategory, seedDefaultChecklist, resetChecklist,
             checkModal, openCheckModal, saveCheckModal, deleteCheckFromModal, isCheckNameInvalid,
             CHECKLIST_CATEGORIES, LUGGAGE_META
         };

@@ -394,7 +394,7 @@
             </div>
 
             <!-- Days Scroller -->
-            <div v-if="viewMode === 'plan'"
+            <div v-if="viewMode === 'plan' && !tripLocked"
                 class="flex overflow-x-auto hide-scroll px-4 pb-3 pt-3 space-x-3 snap-x border-b border-stone-50 w-full touch-pan-x overscroll-contain">
                 <div v-for="(day, index) in days" :key="index" @click="currentDayIdx = index" :data-day-idx="index"
                     class="snap-center shrink-0 flex flex-col items-center justify-center w-[4.5rem] h-[5rem] rounded-[1rem] cursor-pointer transition-all border-0 relative"
@@ -416,7 +416,33 @@
                 <div class="text-xs font-bold text-stone-500">正在同步資料庫...</div>
             </div>
 
-            <transition name="fade" mode="out-in">
+            <!-- 旅程密碼保護：鎖住時完全不顯示行程/記帳/口袋名單等內容，只有輸入正確密碼才放行（僅前端 UI 層級，見 app.js 說明） -->
+            <div v-if="tripLocked && !isDataLoading"
+                class="absolute inset-0 z-40 bg-white flex flex-col items-center justify-center gap-4 p-8 text-center">
+                <div class="w-16 h-16 rounded-full bg-primary-50 flex items-center justify-center">
+                    <i class="ph-duotone ph-lock-key text-3xl text-primary-500"></i>
+                </div>
+                <div>
+                    <h2 class="text-lg font-black text-stone-800">{{ setup.destination || '這趟旅程' }}</h2>
+                    <p class="text-sm text-stone-500 mt-1">此旅程已設定密碼保護，請輸入密碼查看內容</p>
+                </div>
+                <div class="w-full max-w-xs space-y-2">
+                    <input v-model="passcodeInput" type="password" inputmode="numeric" autocomplete="off"
+                        placeholder="旅程密碼" @keyup.enter="unlockTrip"
+                        class="w-full text-center text-lg font-bold bg-stone-50 border-2 rounded-2xl px-4 py-3 focus:ring-2 focus:ring-primary-200 tracking-widest"
+                        :class="passcodeError ? 'border-red-300' : 'border-stone-200'">
+                    <p v-if="passcodeError" class="text-xs text-red-500 font-bold">{{ passcodeError }}</p>
+                    <button @click="unlockTrip" :disabled="isUnlockingPasscode"
+                        class="w-full bg-primary-600 text-white font-bold py-3 rounded-2xl shadow-md shadow-primary-200 hover:bg-primary-700 transition active:scale-95 disabled:opacity-60">
+                        {{ isUnlockingPasscode ? '驗證中...' : '解鎖' }}
+                    </button>
+                    <button @click="showTripMenu = true" class="text-xs font-bold text-stone-400 hover:text-stone-600 py-2">
+                        沒有密碼？先看看其他旅程
+                    </button>
+                </div>
+            </div>
+
+            <transition v-if="!tripLocked" name="fade" mode="out-in">
                 <div v-if="viewMode === 'plan'" key="plan" class="view-pane p-5 pb-32 space-y-6 w-full">
 
                     <div class="flex items-center justify-between">
@@ -455,120 +481,123 @@
                         <!-- 單日日期輸入已移除（v50）：會破壞 days 連續日期不變式，改日期一律走「編輯行程」的 startDate -->
                     </div>
 
-                    <!-- Flight Card -->
+                    <!-- Flight Card：一段航程（去程/回程）可以有多個航班段（轉機） -->
                     <div class="relative">
                         <transition name="fade" mode="out-in">
                             <div v-if="currentDay.flight" key="flight-info"
-                                class="relative bg-gradient-to-br from-primary-50 to-white rounded-[2.5rem] shadow-soft border border-white overflow-hidden group transition-all">
+                                class="relative bg-gradient-to-br from-primary-50 to-white rounded-[2.5rem] shadow-soft border border-white overflow-hidden transition-all">
 
-                                <div
-                                    class="absolute top-0 right-0 w-32 h-32 bg-primary-100 rounded-full blur-2xl -mr-10 -mt-10 opacity-60 pointer-events-none">
-                                </div>
-
-                                <!-- 編輯模式：頂部工具列 -->
-                                <div v-if="editingState.flight"
-                                    class="bg-white/50 backdrop-blur-sm border-b border-white/50 p-3 flex justify-between items-center relative z-10">
-                                    <span class="text-xs font-bold text-primary-500 ml-1">編輯航班</span>
-                                    <div class="flex gap-2">
-                                        <button @click="removeFlight"
+                                <!-- 頂部工具列 -->
+                                <div class="bg-white/50 backdrop-blur-sm border-b border-white/50 p-3 flex justify-between items-center relative z-10">
+                                    <div class="flex items-center gap-2 ml-1 min-w-0">
+                                        <i class="ph-duotone ph-airplane-tilt text-primary-500"></i>
+                                        <input v-if="editingState.flight" v-model="currentDay.flight.label"
+                                            placeholder="去程 / 回程 / 自訂"
+                                            class="text-xs font-bold text-primary-600 bg-white/70 border border-primary-100 rounded-lg px-2 py-1 focus:ring-2 focus:ring-primary-200 min-w-0">
+                                        <span v-else class="text-xs font-bold text-primary-600 truncate">{{ currentDay.flight.label || '航班資訊' }}</span>
+                                    </div>
+                                    <div class="flex gap-2 shrink-0">
+                                        <button v-if="editingState.flight" @click="removeFlight"
                                             class="flex items-center gap-1 px-3 py-1.5 bg-white text-red-400 rounded-xl border border-red-100 shadow-sm hover:bg-red-50 transition text-xs font-bold">
                                             <i class="ph-bold ph-trash"></i>
                                         </button>
-                                        <button @click="editingState.flight = false"
-                                            class="flex items-center gap-1 px-4 py-1.5 bg-primary-400 text-white rounded-xl shadow-md hover:bg-primary-500 transition text-xs font-bold">
-                                            <i class="ph-bold ph-check"></i>
+                                        <button @click="editingState.flight = !editingState.flight"
+                                            class="flex items-center gap-1 px-3 py-1.5 rounded-xl shadow-sm transition text-xs font-bold"
+                                            :class="editingState.flight ? 'bg-primary-400 text-white hover:bg-primary-500' : 'bg-white/60 text-primary-500 hover:bg-white border border-white/60'">
+                                            <i class="ph-bold" :class="editingState.flight ? 'ph-check' : 'ph-pencil-simple'"></i>
                                         </button>
                                     </div>
                                 </div>
 
-                                <!-- 瀏覽模式：編輯按鈕 -->
-                                <div v-else class="absolute top-4 right-4 z-20">
-                                    <button @click="editingState.flight = true"
-                                        class="w-8 h-8 flex items-center justify-center bg-white/40 backdrop-blur text-primary-400 hover:text-primary-600 hover:bg-white rounded-full transition border border-white/60">
-                                        <i class="ph-bold ph-pencil-simple text-base"></i>
+                                <div class="p-4 space-y-3">
+                                    <template v-for="(seg, idx) in currentDay.flight.segments" :key="seg.id">
+                                        <!-- 瀏覽模式：一行摘要 + 確認碼遮蔽 -->
+                                        <div v-if="!editingState.flight" class="bg-white/70 rounded-2xl p-3">
+                                            <div class="font-bold text-stone-800 text-sm">
+                                                <span class="text-primary-600">{{ seg.flightNumber || '航班未定' }}</span>
+                                                <span v-if="seg.airline" class="text-stone-400 font-medium">（{{ seg.airline }}）</span>
+                                                ｜{{ seg.departureAirport || '?' }} {{ formatFlightTime(seg.departureDateTime) }}
+                                                → {{ seg.arrivalAirport || '?' }} {{ formatFlightTime(seg.arrivalDateTime) }}
+                                                <span v-if="isNextDayArrival(seg.departureDateTime, seg.arrivalDateTime)"
+                                                    class="ml-1 text-[10px] font-bold text-red-500 align-top">+1</span>
+                                            </div>
+                                            <div v-if="seg.departureTerminal || seg.arrivalTerminal" class="text-xs text-stone-400 mt-1">
+                                                <span v-if="seg.departureTerminal">出發航廈 {{ seg.departureTerminal }}</span>
+                                                <span v-if="seg.departureTerminal && seg.arrivalTerminal">・</span>
+                                                <span v-if="seg.arrivalTerminal">抵達航廈 {{ seg.arrivalTerminal }}</span>
+                                            </div>
+                                            <div v-if="seg.notes" class="text-xs text-stone-500 mt-1 whitespace-pre-wrap">{{ seg.notes }}</div>
+                                            <div class="flex items-center gap-2 mt-2 text-xs">
+                                                <span class="text-stone-400 font-bold">確認碼</span>
+                                                <span class="font-mono font-bold text-stone-600">{{ revealedFlightConfirmations[seg.id] ? (seg.confirmationNumber || '未填寫') : (seg.confirmationNumber ? maskConfirmation() : '未填寫') }}</span>
+                                                <button v-if="seg.confirmationNumber" @click="toggleFlightConfirmation(seg.id)" class="text-primary-500 font-bold">
+                                                    {{ revealedFlightConfirmations[seg.id] ? '隱藏' : '顯示' }}
+                                                </button>
+                                            </div>
+                                        </div>
+
+                                        <!-- 轉機時間（能算就顯示，不能算就交給 notes） -->
+                                        <div v-if="!editingState.flight && idx < currentDay.flight.segments.length - 1 && formatLayover(seg.arrivalDateTime, currentDay.flight.segments[idx + 1].departureDateTime)"
+                                            class="flex justify-center">
+                                            <span class="text-[11px] font-bold text-amber-700 bg-amber-50 rounded-full py-1 px-3">
+                                                {{ formatLayover(seg.arrivalDateTime, currentDay.flight.segments[idx + 1].departureDateTime) }}
+                                            </span>
+                                        </div>
+
+                                        <!-- 編輯模式：完整欄位 -->
+                                        <div v-if="editingState.flight" class="bg-white rounded-2xl p-3 space-y-2 border border-stone-100">
+                                            <div class="flex items-center justify-between">
+                                                <span class="text-xs font-bold text-stone-400">航班段 {{ idx + 1 }}</span>
+                                                <div class="flex items-center gap-1">
+                                                    <button v-if="idx > 0" @click="moveFlightSegment(currentDay.flight, seg.id, -1)" aria-label="上移"
+                                                        class="w-6 h-6 flex items-center justify-center text-stone-400 hover:text-primary-500"><i class="ph-bold ph-arrow-up text-sm"></i></button>
+                                                    <button v-if="idx < currentDay.flight.segments.length - 1" @click="moveFlightSegment(currentDay.flight, seg.id, 1)" aria-label="下移"
+                                                        class="w-6 h-6 flex items-center justify-center text-stone-400 hover:text-primary-500"><i class="ph-bold ph-arrow-down text-sm"></i></button>
+                                                    <button v-if="currentDay.flight.segments.length > 1" @click="removeFlightSegment(currentDay.flight, seg.id)" aria-label="刪除此航班段"
+                                                        class="w-6 h-6 flex items-center justify-center text-red-300 hover:text-red-500"><i class="ph-bold ph-x text-sm"></i></button>
+                                                </div>
+                                            </div>
+                                            <div class="grid grid-cols-2 gap-2">
+                                                <input v-model="seg.airline" placeholder="航空公司"
+                                                    class="text-xs bg-stone-50 border border-stone-200 rounded-lg px-2 py-1.5 focus:ring-2 focus:ring-primary-100">
+                                                <input v-model="seg.flightNumber" placeholder="航班號 BR8"
+                                                    class="text-xs bg-stone-50 border border-stone-200 rounded-lg px-2 py-1.5 uppercase focus:ring-2 focus:ring-primary-100">
+                                            </div>
+                                            <div class="grid grid-cols-2 gap-2">
+                                                <input v-model="seg.departureAirport" placeholder="出發機場 TPE"
+                                                    class="text-xs bg-stone-50 border border-stone-200 rounded-lg px-2 py-1.5 uppercase focus:ring-2 focus:ring-primary-100">
+                                                <input v-model="seg.arrivalAirport" placeholder="抵達機場 SFO"
+                                                    class="text-xs bg-stone-50 border border-stone-200 rounded-lg px-2 py-1.5 uppercase focus:ring-2 focus:ring-primary-100">
+                                            </div>
+                                            <div class="grid grid-cols-2 gap-2">
+                                                <div>
+                                                    <label class="text-[9px] text-stone-400 font-bold block mb-0.5">出發時間</label>
+                                                    <input v-model="seg.departureDateTime" type="datetime-local"
+                                                        class="w-full text-xs bg-stone-50 border border-stone-200 rounded-lg px-2 py-1.5 focus:ring-2 focus:ring-primary-100">
+                                                </div>
+                                                <div>
+                                                    <label class="text-[9px] text-stone-400 font-bold block mb-0.5">抵達時間</label>
+                                                    <input v-model="seg.arrivalDateTime" type="datetime-local"
+                                                        class="w-full text-xs bg-stone-50 border border-stone-200 rounded-lg px-2 py-1.5 focus:ring-2 focus:ring-primary-100">
+                                                </div>
+                                            </div>
+                                            <div class="grid grid-cols-2 gap-2">
+                                                <input v-model="seg.departureTerminal" placeholder="出發航廈"
+                                                    class="text-xs bg-stone-50 border border-stone-200 rounded-lg px-2 py-1.5 focus:ring-2 focus:ring-primary-100">
+                                                <input v-model="seg.arrivalTerminal" placeholder="抵達航廈"
+                                                    class="text-xs bg-stone-50 border border-stone-200 rounded-lg px-2 py-1.5 focus:ring-2 focus:ring-primary-100">
+                                            </div>
+                                            <input v-model="seg.confirmationNumber" placeholder="確認碼 / Booking Reference"
+                                                class="w-full text-xs bg-stone-50 border border-stone-200 rounded-lg px-2 py-1.5 font-mono focus:ring-2 focus:ring-primary-100">
+                                            <textarea v-model="seg.notes" rows="2" placeholder="備註（例如轉機時間、行李須知、尚未確認的部分）"
+                                                class="w-full text-xs bg-stone-50 border border-stone-200 rounded-lg px-2 py-1.5 resize-none focus:ring-2 focus:ring-primary-100"></textarea>
+                                        </div>
+                                    </template>
+
+                                    <button v-if="editingState.flight" @click="addFlightSegment(currentDay.flight)"
+                                        class="w-full py-2.5 border-2 border-dashed border-primary-200 rounded-xl text-primary-500 text-xs font-bold hover:bg-primary-50 transition flex items-center justify-center gap-1">
+                                        <i class="ph-bold ph-plus"></i> 新增航班段（轉機）
                                     </button>
-                                </div>
-
-                                <div v-if="!editingState.flight"
-                                    class="h-1.5 w-full bg-gradient-to-r from-primary-200 via-primary-300 to-primary-200">
-                                </div>
-
-                                <div class="p-6 relative z-0">
-                                    <div class="flex justify-between"
-                                        :class="editingState.flight ? 'items-start' : 'items-end'">
-                                        <!-- Start -->
-                                        <div class="text-left w-1/3">
-                                            <div v-if="editingState.flight" class="space-y-2">
-                                                <label
-                                                    class="text-[10px] text-primary-400 font-bold block uppercase tracking-wider">出發</label>
-                                                <input v-model="currentDay.flight.startAirport"
-                                                    class="text-xl font-black text-primary-600 bg-white/60 border-0 rounded-2xl p-2 w-full text-center focus:ring-2 focus:ring-primary-200 uppercase placeholder:text-primary-200 shadow-sm"
-                                                    placeholder="TPE">
-                                                <input v-model="currentDay.flight.startTime" type="time"
-                                                    class="text-sm font-bold text-stone-600 bg-stone-50 border border-stone-200 rounded-lg p-2 w-full text-center">
-                                            </div>
-                                            <div v-else>
-                                                <div class="text-3xl font-black text-stone-800 uppercase">{{
-                                                    currentDay.flight.startAirport || '---' }}</div>
-                                                <div class="text-sm font-bold text-stone-500">{{
-                                                    currentDay.flight.startTime
-                                                    || '--:--' }}</div>
-                                            </div>
-                                        </div>
-
-                                        <!-- Middle -->
-                                        <div class="flex-1 px-2 text-center pb-2 flex flex-col justify-end">
-                                            <div class="flex items-center justify-center gap-2 text-stone-300 mb-2">
-                                                <div
-                                                    class="h-[2px] flex-1 bg-stone-200 border-t border-dashed border-stone-300">
-                                                </div>
-                                                <i class="ph-fill ph-airplane text-xl text-primary-500 rotate-90"></i>
-                                                <div
-                                                    class="h-[2px] flex-1 bg-stone-200 border-t border-dashed border-stone-300">
-                                                </div>
-                                            </div>
-                                            <div v-if="editingState.flight">
-                                                <input v-model="currentDay.flight.number"
-                                                    class="text-xs font-bold text-primary-600 bg-primary-50 rounded-md py-1 px-2 text-center w-full focus:ring-0 uppercase tracking-wider"
-                                                    placeholder="航班號">
-                                            </div>
-                                            <div v-else
-                                                class="text-xs font-bold text-primary-600 bg-primary-50 rounded-md py-0.5 px-2 uppercase tracking-wider inline-block">
-                                                {{ currentDay.flight.number || 'FLIGHT' }}</div>
-                                        </div>
-
-                                        <!-- End -->
-                                        <div class="text-right w-1/3 relative">
-                                            <div v-if="editingState.flight" class="space-y-2">
-                                                <label class="text-[10px] text-stone-500 font-bold block">抵達</label>
-                                                <input v-model="currentDay.flight.endAirport"
-                                                    class="text-2xl font-black text-stone-800 bg-stone-50 border border-stone-200 rounded-lg p-2 w-full text-center focus:ring-2 focus:ring-primary-200 uppercase placeholder:text-stone-300"
-                                                    placeholder="NRT">
-                                                <input v-model="currentDay.flight.endTime" type="time"
-                                                    class="text-sm font-bold text-stone-600 bg-stone-50 border border-stone-200 rounded-lg p-2 w-full text-center">
-                                                <div class="flex justify-end">
-                                                    <select v-model="currentDay.flight.arrivalOffset"
-                                                        class="bg-stone-100 text-xs rounded p-1 border-none focus:ring-0 text-stone-500 font-bold">
-                                                        <option value="0">同日</option>
-                                                        <option value="1">+1天</option>
-                                                        <option value="-1">-1天</option>
-                                                    </select>
-                                                </div>
-                                            </div>
-                                            <div v-else>
-                                                <div class="text-3xl font-black text-stone-800 uppercase">{{
-                                                    currentDay.flight.endAirport || '---' }}</div>
-                                                <div class="text-sm font-bold text-stone-500">{{
-                                                    currentDay.flight.endTime
-                                                    || '--:--' }}</div>
-                                            </div>
-
-                                            <div v-if="!editingState.flight && currentDay.flight.arrivalOffset != 0"
-                                                class="absolute -top-2 -right-1 bg-red-500 text-white text-[10px] font-bold px-1.5 py-0.5 rounded-full shadow-md pointer-events-none z-0">
-                                                {{ currentDay.flight.arrivalOffset > 0 ? '+1' : '-1' }}
-                                            </div>
-                                        </div>
-                                    </div>
                                 </div>
                             </div>
 
@@ -651,13 +680,81 @@
                     </div>
                 </div>
 
+                <div v-else-if="viewMode === 'bookings'" key="bookings"
+                    class="view-pane p-5 pb-32 space-y-4 flex-1 overflow-y-auto hide-scroll">
+                    <div class="mb-4">
+                        <h2 class="text-2xl font-black text-stone-800 flex items-center gap-2">
+                            <i class="ph-bold ph-ticket text-primary-500 text-2xl"></i> 訂位與票券
+                        </h2>
+                        <p class="text-sm text-stone-500 pl-1">飯店／航班／餐廳訂位／票券集中管理・確認碼預設遮蔽</p>
+                    </div>
+
+                    <div v-if="!bookings.length"
+                        class="bg-white rounded-3xl border border-stone-100 shadow-soft p-8 text-center space-y-4">
+                        <i class="ph-bold ph-ticket text-5xl text-stone-200"></i>
+                        <p class="text-sm text-stone-500 leading-relaxed">還沒有任何訂位或票券紀錄</p>
+                    </div>
+
+                    <div v-for="b in sortedBookings" :key="b.id"
+                        class="bg-white rounded-2xl shadow-sm border border-stone-100 p-4 space-y-2 cursor-pointer active:bg-stone-50"
+                        @click="openBookingModal(b)">
+                        <div class="flex items-start justify-between gap-2">
+                            <div class="flex items-center gap-2 min-w-0">
+                                <span class="w-9 h-9 rounded-xl bg-primary-50 text-primary-500 flex items-center justify-center shrink-0">
+                                    <i :class="(BOOKING_TYPE_META[b.type] || BOOKING_TYPE_META.other).icon"></i>
+                                </span>
+                                <div class="min-w-0">
+                                    <div class="font-bold text-stone-800 truncate">{{ b.title || '未命名' }}</div>
+                                    <div class="text-xs text-stone-400">
+                                        {{ (BOOKING_TYPE_META[b.type] || BOOKING_TYPE_META.other).label }}
+                                        <span v-if="b.date"> ・ {{ b.date }}{{ b.time ? ' ' + b.time : '' }}</span>
+                                    </div>
+                                </div>
+                            </div>
+                            <i class="ph-bold ph-pencil-simple text-stone-300 shrink-0"></i>
+                        </div>
+                        <div v-if="b.location" class="text-xs text-stone-500 flex items-center gap-1">
+                            <i class="ph-bold ph-map-pin"></i> {{ b.location }}
+                        </div>
+                        <div class="flex items-center justify-between gap-2 flex-wrap text-xs">
+                            <span v-if="b.bookedBy" class="bg-stone-50 text-stone-500 font-bold px-2 py-1 rounded-full">{{ b.bookedBy }} 訂的</span>
+                            <span v-if="b.cost" class="bg-stone-50 text-stone-500 font-bold px-2 py-1 rounded-full">{{ b.cost }}</span>
+                            <span class="flex items-center gap-1.5 ml-auto" @click.stop>
+                                <span class="text-stone-400 font-bold">確認碼</span>
+                                <span class="font-mono font-bold text-stone-600">{{ revealedBookingConfirmations[b.id] ? (b.confirmationNumber || '未填寫') : (b.confirmationNumber ? '••••••' : '未填寫') }}</span>
+                                <button v-if="b.confirmationNumber" @click="toggleBookingConfirmation(b.id)" class="text-primary-500 font-bold">
+                                    {{ revealedBookingConfirmations[b.id] ? '隱藏' : '顯示' }}
+                                </button>
+                            </span>
+                        </div>
+                        <div v-if="b.notes" class="text-xs text-stone-500 whitespace-pre-wrap">{{ b.notes }}</div>
+                    </div>
+
+                    <button @click="openBookingModal()"
+                        class="w-full py-4 border-2 border-dashed border-stone-300 rounded-2xl text-stone-500 hover:border-primary-400 hover:text-primary-600 hover:bg-primary-50 transition flex items-center justify-center gap-2 font-bold">
+                        <i class="ph-bold ph-plus"></i> 新增訂位/票券
+                    </button>
+                </div>
+
                 <div v-else-if="viewMode === 'locations'" key="locations"
                     class="view-pane p-5 pb-32 space-y-6 flex-1 overflow-y-auto hide-scroll">
                     <div class="mb-4">
                         <h2 class="text-2xl font-black text-stone-800 flex items-center gap-2">
                             <i class="ph-bold ph-map-pin text-primary-500 text-2xl"></i> 口袋名單
                         </h2>
-                        <p class="text-sm text-stone-500 pl-1">點卡片可編輯・按住 ⠿ 拖曳排序</p>
+                        <p class="text-sm text-stone-500 pl-1">點卡片可編輯・按住 ⠿ 拖曳排序・可各自標記想不想去</p>
+                    </div>
+
+                    <!-- 尚未選擇「我是誰」：標記偏好前先選一次身份（跟旅遊清單共用同一個身份）-->
+                    <div v-if="!activeChecklistMember && checklistMembers.length > 1"
+                        class="bg-white rounded-2xl border border-stone-100 shadow-sm p-4 space-y-2">
+                        <p class="text-sm text-stone-500">先選擇你是誰，才能標記自己的偏好（想去／備案／不想去）：</p>
+                        <div class="flex flex-wrap gap-2">
+                            <button v-for="m in checklistMembers" :key="m" @click="chooseChecklistMember(m)"
+                                class="px-3 py-1.5 rounded-full text-xs font-bold border bg-stone-50 border-stone-200 text-stone-600 hover:border-primary-300 transition">
+                                我是 {{ memberLabel(m) || '共用' }}
+                            </button>
+                        </div>
                     </div>
 
                     <div id="saved-locations-list" class="space-y-4">
@@ -693,6 +790,31 @@
                                     </a>
                                     <div v-if="loc.note" class="text-sm text-stone-600 whitespace-pre-wrap leading-relaxed">
                                         {{ loc.note }}</div>
+
+                                    <!-- 旅伴偏好：地點共用，偏好各自標記，不做票數排行 -->
+                                    <div class="pt-2 mt-1 border-t border-stone-50 space-y-2" @click.stop>
+                                        <div v-if="activeChecklistMember" class="flex items-center gap-2 flex-wrap">
+                                            <span class="text-[10px] font-bold text-stone-400 uppercase tracking-wide shrink-0">我的偏好</span>
+                                            <button v-for="opt in LOC_PREF_ORDER" :key="opt" @click="setLocPref(loc, activeChecklistMember, opt)"
+                                                class="px-2.5 py-1 rounded-full text-xs font-bold border transition"
+                                                :class="loc.prefs?.[activeChecklistMember] === opt ? LOC_PREF_META[opt].activeClass : 'bg-white border-stone-200 text-stone-400 hover:border-stone-300'">
+                                                {{ LOC_PREF_META[opt].emoji }} {{ LOC_PREF_META[opt].label }}
+                                            </button>
+                                        </div>
+
+                                        <div v-if="otherMemberPrefs(loc).length" class="flex flex-wrap gap-1.5">
+                                            <span v-for="mp in otherMemberPrefs(loc)" :key="mp.member"
+                                                class="inline-flex items-center gap-1 text-[11px] font-bold px-2 py-1 rounded-full"
+                                                :class="mp.pref ? LOC_PREF_META[mp.pref].chipClass : 'bg-stone-50 text-stone-400 border border-stone-100'">
+                                                {{ memberLabel(mp.member) || mp.member }}：{{ mp.pref ? (LOC_PREF_META[mp.pref].emoji + ' ' + LOC_PREF_META[mp.pref].label) : '尚未標記' }}
+                                            </span>
+                                        </div>
+
+                                        <div v-if="locConsensus(loc)" class="text-xs font-bold px-2.5 py-1.5 rounded-lg inline-block"
+                                            :class="locConsensus(loc).cls">
+                                            {{ locConsensus(loc).text }}
+                                        </div>
+                                    </div>
                                 </div>
                             </div>
                         </div>
@@ -835,14 +957,9 @@
                             </h2>
                             <p class="text-sm text-stone-500 pl-1">點卡片可編輯・點圓圈打勾</p>
                         </div>
-                        <div class="relative shrink-0">
-                            <select v-model="activeChecklistMember" aria-label="目前操作角色"
-                                class="bg-primary-50 border border-primary-100 rounded-xl text-sm font-bold text-primary-700 py-2 pl-3 pr-8 focus:ring-2 focus:ring-primary-200 appearance-none cursor-pointer">
-                                <option v-for="m in checklistMembers" :key="m" :value="m">
-                                    {{ memberLabel(m) || '共用' }}</option>
-                            </select>
-                            <i
-                                class="ph-bold ph-caret-down absolute right-2.5 top-1/2 -translate-y-1/2 text-primary-400 pointer-events-none text-xs"></i>
+                        <div v-if="activeChecklistMember"
+                            class="shrink-0 bg-primary-50 border border-primary-100 rounded-xl text-sm font-bold text-primary-700 py-2 px-3 whitespace-nowrap">
+                            {{ memberLabel(activeChecklistMember) ? memberLabel(activeChecklistMember) + ' 的清單' : '共用清單' }}
                         </div>
                     </div>
 
@@ -859,18 +976,29 @@
                             自己新增</button>
                     </div>
 
+                    <!-- 尚未選擇「我是誰」：不顯示清單內容，避免預設看到/動到旅伴的勾選 -->
+                    <div v-else-if="!activeChecklistMember"
+                        class="bg-white rounded-3xl border border-stone-100 shadow-soft p-8 text-center space-y-4">
+                        <i class="ph-bold ph-user-circle text-5xl text-stone-200"></i>
+                        <p class="text-sm text-stone-500 leading-relaxed">這是誰的打包清單？<br>選擇後只會顯示你自己的勾選進度，不會看到或動到旅伴的清單。</p>
+                        <div class="space-y-2">
+                            <button v-for="m in checklistMembers" :key="m" @click="chooseChecklistMember(m)"
+                                class="w-full py-3.5 bg-primary-500 text-white rounded-2xl font-bold shadow-md shadow-primary-500/30 active:scale-95 transition">
+                                我是 {{ memberLabel(m) || '共用' }}
+                            </button>
+                        </div>
+                    </div>
+
                     <template v-else>
-                        <!-- 成員進度＋重設勾選 -->
+                        <!-- 我的進度＋重設勾選 -->
                         <div
                             class="bg-white rounded-3xl border border-stone-100 shadow-soft p-4 flex items-center justify-between gap-3">
-                            <div class="flex flex-wrap items-center gap-2 min-w-0">
-                                <span v-for="p in checklistProgress" :key="p.member"
-                                    class="check-progress-chip inline-flex items-center gap-1.5 bg-stone-50 border border-stone-100 rounded-full px-3 py-1.5 text-sm font-bold text-stone-600">
-                                    <span v-if="memberLabel(p.member)">{{ memberLabel(p.member) }}</span>
-                                    <span class="text-primary-600 font-black">{{ p.done }}/{{ p.total }}</span>
-                                </span>
-                            </div>
-                            <button @click="resetChecklist" aria-label="重設目前成員的勾選"
+                            <span
+                                class="check-progress-chip inline-flex items-center gap-1.5 bg-stone-50 border border-stone-100 rounded-full px-3 py-1.5 text-sm font-bold text-stone-600">
+                                <span>{{ memberLabel(activeChecklistMember) ? memberLabel(activeChecklistMember) + ' 的進度' : '我的進度' }}</span>
+                                <span class="text-primary-600 font-black">{{ myChecklistProgress.done }}/{{ myChecklistProgress.total }}</span>
+                            </span>
+                            <button @click="resetChecklist" aria-label="重設我的勾選"
                                 class="shrink-0 w-9 h-9 rounded-full bg-stone-100 text-stone-500 flex items-center justify-center hover:bg-stone-200 transition">
                                 <i class="ph-bold ph-arrow-counter-clockwise"></i>
                             </button>
@@ -1033,6 +1161,13 @@
                         :class="viewMode === 'plan' ? '' : 'opacity-40'"><i class="ph-bold ph-calendar-blank"
                             style="font-size:1.55rem"></i></span><span
                         class="text-[12px] font-bold leading-none">行程</span></button>
+                <button @click="viewMode = 'bookings'"
+                    class="flex-1 flex flex-col items-center justify-center gap-0.5 py-1.5 rounded-2xl transition-all active:scale-95"
+                    :class="viewMode === 'bookings' ? 'bg-primary-50 text-primary-600' : 'text-stone-400'">
+                    <span class="flex items-center justify-center transition-all" style="width:1.9rem;height:1.9rem"
+                        :class="viewMode === 'bookings' ? '' : 'opacity-40'"><i class="ph-bold ph-ticket"
+                            style="font-size:1.55rem"></i></span><span
+                        class="text-[12px] font-bold leading-none">訂位</span></button>
                 <button @click="viewMode = 'locations'"
                     class="flex-1 flex flex-col items-center justify-center gap-0.5 py-1.5 rounded-2xl transition-all active:scale-95"
                     :class="viewMode === 'locations' ? 'bg-primary-50 text-primary-600' : 'text-stone-400'">
@@ -1186,6 +1321,18 @@
                             </template>
                         </div>
                     </div>
+                    <!-- 打包清單身份：只影響自己裝置看到的勾選進度，不會顯示或動到旅伴的清單 -->
+                    <div v-if="currentTripId && checklistMembers.length > 1" class="mt-4 pt-4 border-t border-stone-100">
+                        <h3 class="text-xs font-black text-stone-400 tracking-wide mb-1">打包清單身份</h3>
+                        <p class="text-[10px] text-stone-400 mb-2">切換後只影響你自己看到的打包清單勾選進度</p>
+                        <div class="flex flex-wrap gap-2">
+                            <button v-for="m in checklistMembers" :key="m" @click="chooseChecklistMember(m)"
+                                class="px-3 py-1.5 rounded-full text-xs font-bold border transition"
+                                :class="activeChecklistMember === m ? 'bg-primary-600 border-primary-600 text-white' : 'bg-stone-50 border-stone-200 text-stone-500 hover:border-primary-200'">
+                                我是 {{ memberLabel(m) || '共用' }}
+                            </button>
+                        </div>
+                    </div>
                     <div class="mt-4 pt-4 border-t border-stone-100 text-center">
                         <p class="text-[10px] text-stone-300 font-medium">Designed by Gemini • Firestore Sync</p>
                     </div>
@@ -1325,6 +1472,41 @@
                         </div>
                     </div>
 
+                    <!-- 旅程密碼保護：分享連結以外的一層保護，避免拿到連結的人直接看到訂房/航班/花費細節 -->
+                    <div class="space-y-2">
+                        <label class="text-xs font-bold text-stone-500 ml-2 uppercase tracking-widest">Trip
+                            Passcode <span class="normal-case tracking-normal font-medium">（選填）</span></label>
+                        <div v-if="!isSettingPasscode && setup.passcodeEnabled"
+                            class="flex items-center justify-between bg-primary-50 border border-primary-100 rounded-2xl px-4 py-3">
+                            <span class="text-sm font-bold text-primary-700 flex items-center gap-1.5">
+                                <i class="ph-bold ph-lock-key"></i> 已啟用密碼保護
+                            </span>
+                            <div class="flex gap-2">
+                                <button @click="openPasscodeEditor" class="text-xs font-bold text-primary-600 hover:text-primary-800">更改</button>
+                                <button @click="removeTripPasscode" class="text-xs font-bold text-red-400 hover:text-red-600">移除</button>
+                            </div>
+                        </div>
+                        <div v-else-if="!isSettingPasscode"
+                            class="flex items-center justify-between bg-stone-50 border border-stone-100 rounded-2xl px-4 py-3">
+                            <span class="text-sm font-medium text-stone-400 flex items-center gap-1.5">
+                                <i class="ph-bold ph-lock-simple-open"></i> 尚未設定密碼保護
+                            </span>
+                            <button @click="openPasscodeEditor" class="text-xs font-bold text-primary-600 hover:text-primary-800">設定密碼</button>
+                        </div>
+                        <div v-else class="space-y-2">
+                            <input v-model="passcodeDraftInput" type="password" autocomplete="off"
+                                placeholder="輸入新密碼"
+                                class="w-full bg-stone-50 border-2 border-stone-100 rounded-2xl px-4 py-3 text-stone-800 font-bold focus:ring-4 focus:ring-primary-500/10 focus:border-primary-400 transition-all placeholder:text-stone-300">
+                            <div class="flex gap-2">
+                                <button @click="cancelPasscodeEditor"
+                                    class="flex-1 py-2 bg-white text-stone-400 rounded-xl text-xs font-bold border border-stone-200 hover:bg-stone-50 transition">取消</button>
+                                <span class="flex-1 py-2 text-center text-[11px] text-stone-400 self-center">按下方「{{ isEditing ? '儲存設定' : '開始規劃' }}」才會生效</span>
+                            </div>
+                        </div>
+                        <p class="text-[10px] text-stone-400 leading-relaxed ml-2">
+                            密碼只用來擋住畫面顯示，不是伺服器端保護，仍請只把連結傳給信任的旅伴。
+                        </p>
+                    </div>
 
                     <button @click="initTrip"
                         class="w-full bg-stone-800 hover:bg-stone-700 text-white font-black text-lg py-4 rounded-3xl shadow-xl shadow-stone-800/20 transform active:scale-[0.98] transition-all flex items-center justify-center gap-2 mt-8 group tracking-wide">
@@ -1344,7 +1526,7 @@
 
         <!-- Floating Action Button (User Custom Button) -->
         <div class="fixed right-6 z-50" style="bottom: calc(5.5rem + env(safe-area-inset-bottom))"
-            v-if="viewMode === 'plan' && !showSetupModal && !showTripMenu">
+            v-if="viewMode === 'plan' && !showSetupModal && !showTripMenu && !tripLocked">
             <button @click="openItemModal()"
                 class="w-14 h-14 bg-gradient-to-br from-primary-400 to-primary-600 rounded-full shadow-glow flex items-center justify-center text-white hover:scale-110 transition-transform active:scale-95 relative group border-4 border-white/50">
                 <!-- Icon -->
@@ -1602,6 +1784,89 @@
                             <button @click="saveCheckModal"
                                 class="bg-primary-600 text-white px-6 py-2.5 rounded-xl font-bold shadow-md shadow-primary-200 hover:bg-primary-700 transition active:scale-95 flex items-center gap-2">
                                 <i class="ph-bold ph-check"></i> {{ checkModal.mode === 'edit' ? '儲存' : '新增' }}
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </transition>
+
+        <!-- ===== 訂位/票券編輯彈窗 ===== -->
+        <transition name="sheet">
+            <div v-if="bookingModal.show" class="sheet-host absolute inset-x-0 top-0 z-[70] flex items-end justify-center">
+                <div class="absolute inset-0 bg-stone-900/40 backdrop-blur-sm" @click="bookingModal.show = false"></div>
+                <div class="sheet-panel relative z-10 w-full bg-white rounded-t-[2rem] shadow-2xl max-h-[85%] overflow-y-auto hide-scroll"
+                    style="padding-bottom: calc(1.25rem + env(safe-area-inset-bottom))">
+                    <div class="sticky top-0 bg-white/95 backdrop-blur-sm px-5 pt-4 pb-3 border-b border-stone-100 z-10">
+                        <div class="w-10 h-1 bg-stone-200 rounded-full mx-auto mb-3"></div>
+                        <div class="flex items-center justify-between">
+                            <h3 class="text-lg font-black text-stone-800">{{ bookingModal.mode === 'edit' ? '編輯訂位/票券' : '新增訂位/票券' }}</h3>
+                            <button @click="bookingModal.show = false" aria-label="取消並關閉"
+                                class="w-9 h-9 rounded-full bg-stone-100 text-stone-500 flex items-center justify-center hover:bg-stone-200 transition">
+                                <i class="ph-bold ph-x"></i>
+                            </button>
+                        </div>
+                    </div>
+
+                    <div v-if="bookingModal.draft" class="p-5 space-y-4">
+                        <div class="grid grid-cols-5 gap-1 bg-stone-50 p-1 rounded-xl border border-stone-200">
+                            <button v-for="(meta, key) in BOOKING_TYPE_META" :key="key"
+                                @click="bookingModal.draft.type = key"
+                                class="rounded-lg flex flex-col items-center justify-center py-1.5 transition-colors"
+                                :class="bookingModal.draft.type === key ? 'bg-white shadow-sm' : 'opacity-40 hover:opacity-100'">
+                                <i :class="meta.icon" class="text-base"></i>
+                                <span class="text-[9px] font-bold text-stone-500 mt-0.5">{{ meta.label }}</span>
+                            </button>
+                        </div>
+
+                        <input v-model="bookingModal.draft.title"
+                            class="js-booking-title w-full font-bold text-lg text-stone-800 bg-stone-50 rounded-xl px-3 py-2.5 border-none focus:ring-2 focus:ring-primary-200 placeholder:text-stone-300"
+                            placeholder="名稱（飯店/航班/餐廳/票券名稱）">
+
+                        <div class="grid grid-cols-2 gap-2">
+                            <input v-model="bookingModal.draft.date" type="date"
+                                class="text-sm bg-stone-50 border border-stone-200 rounded-xl px-3 py-2.5 focus:ring-2 focus:ring-primary-100">
+                            <input v-model="bookingModal.draft.time" type="time"
+                                class="text-sm bg-stone-50 border border-stone-200 rounded-xl px-3 py-2.5 focus:ring-2 focus:ring-primary-100">
+                        </div>
+
+                        <div class="flex items-center gap-2 bg-stone-50 rounded-xl px-3 py-2 border border-stone-100 focus-within:border-primary-200 focus-within:bg-white transition-colors">
+                            <i class="ph-bold ph-map-pin text-stone-500 shrink-0"></i>
+                            <input v-model="bookingModal.draft.location"
+                                class="flex-1 min-w-0 text-sm font-medium bg-transparent focus:outline-none text-stone-700"
+                                placeholder="地點（可選）">
+                        </div>
+
+                        <div class="grid grid-cols-2 gap-2">
+                            <select v-model="bookingModal.draft.bookedBy"
+                                class="text-sm bg-stone-50 border border-stone-200 rounded-xl px-3 py-2.5 focus:ring-2 focus:ring-primary-100">
+                                <option value="">誰訂的（可選）</option>
+                                <option v-for="p in participants" :value="p">{{ p }}</option>
+                            </select>
+                            <input v-model="bookingModal.draft.cost" placeholder="費用（可選）"
+                                class="text-sm bg-stone-50 border border-stone-200 rounded-xl px-3 py-2.5 focus:ring-2 focus:ring-primary-100">
+                        </div>
+
+                        <div>
+                            <label class="text-[10px] font-bold text-stone-600 uppercase mb-1 block">確認碼 / 票券號碼</label>
+                            <input v-model="bookingModal.draft.confirmationNumber" placeholder="Confirmation Number"
+                                class="w-full text-sm bg-stone-50 border border-stone-200 rounded-xl px-3 py-2.5 font-mono focus:ring-2 focus:ring-primary-100">
+                            <p class="text-[10px] text-stone-400 mt-1">瀏覽時會預設遮蔽（••••••），要按「顯示」才會展開，不會直接出現在行程摘要上。</p>
+                        </div>
+
+                        <textarea v-model="bookingModal.draft.notes" rows="2"
+                            class="w-full text-sm text-stone-500 bg-stone-50 rounded-xl px-3 py-2.5 border-none focus:ring-2 focus:ring-primary-100 placeholder:text-stone-300 resize-none leading-relaxed"
+                            placeholder="備註"></textarea>
+
+                        <div class="flex items-center justify-between pt-2 border-t border-stone-50">
+                            <button v-if="bookingModal.mode === 'edit'" @click="deleteBookingFromModal"
+                                class="text-red-400 hover:text-red-500 hover:bg-red-50 px-3 py-2 rounded-lg text-xs font-bold transition flex items-center gap-1">
+                                <i class="ph-bold ph-trash"></i> 刪除
+                            </button>
+                            <span v-else></span>
+                            <button @click="saveBookingModal"
+                                class="bg-primary-600 text-white px-6 py-2.5 rounded-xl font-bold shadow-md shadow-primary-200 hover:bg-primary-700 transition active:scale-95 flex items-center gap-2">
+                                <i class="ph-bold ph-check"></i> {{ bookingModal.mode === 'edit' ? '儲存' : '新增' }}
                             </button>
                         </div>
                     </div>

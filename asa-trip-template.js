@@ -61,3 +61,23 @@ export const ASA_SD_2026_POSTER = {
     type: 'conference',
     note: 'Poster presentation — ASA San Diego 2026. Date/time: TBD. Location: TBD. Poster number: TBD. Add upload deadline, check-in requirement, and presentation time after ASA notification.',
 };
+
+// 航班（多航段）：outbound 掛在 date 那一天的 day.flight，return 同理。
+// segments 沒有 id——seed 時（見 app.js 的 seedAsaSanDiego2026Days）才補，跟 checklist/poster 的模板套路一致。
+export const ASA_SD_2026_FLIGHTS = {
+    outbound: {
+        date: '2026-10-14',
+        label: '去程',
+        segments: [
+            { airline: 'EVA Air', flightNumber: 'BR8', departureAirport: 'TPE', arrivalAirport: 'SFO', departureDateTime: '2026-10-14T10:15', arrivalDateTime: '2026-10-14T06:35', departureTerminal: '', arrivalTerminal: '', confirmationNumber: '', notes: '' },
+            { airline: 'Alaska Airlines', flightNumber: 'AS740', departureAirport: 'SFO', arrivalAirport: 'SAN', departureDateTime: '2026-10-14T10:40', arrivalDateTime: '2026-10-14T12:23', departureTerminal: '', arrivalTerminal: '', confirmationNumber: '', notes: '' },
+        ],
+    },
+    return: {
+        date: '2026-10-21',
+        label: '回程',
+        segments: [
+            { airline: '', flightNumber: '', departureAirport: 'SAN', arrivalAirport: '', departureDateTime: '2026-10-21T18:51', arrivalDateTime: '', departureTerminal: '', arrivalTerminal: '', confirmationNumber: '', notes: 'TBD：回程其餘航班段（轉機／抵達）尚未確認，請自行補上。' },
+        ],
+    },
+};
