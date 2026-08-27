@@ -8,6 +8,7 @@ import { initializeApp } from "https://www.gstatic.com/firebasejs/10.7.1/firebas
 import { getAuth, signInAnonymously, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-auth.js";
 import { initializeFirestore, collection, doc, setDoc, onSnapshot, getDocs, persistentLocalCache, persistentMultipleTabManager } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js";
 import { CHECKLIST_CATEGORIES, LUGGAGE_META, CHECKLIST_TEMPLATE } from './checklist-data.js';
+import { ASA_SD_2026_TRIP_DEFAULTS, ASA_SD_2026_ITINERARY, ASA_SD_2026_POSTER } from './asa-trip-template.js';
 
 createApp({
     setup() {
@@ -163,7 +164,7 @@ createApp({
             editingState.flight = false;
             showToast('已移除航班資訊', { icon: 'ph-bold ph-trash', undo: () => { day.flight = removed; } });
         };
-        const getDotColor = (t) => { if (t === 'food') return 'bg-orange-400 border-orange-100 ring-2 ring-orange-50'; if (t === 'shop') return 'bg-pink-400 border-pink-100 ring-2 ring-pink-50'; if (t === 'transport' || t === 'flight') return 'bg-blue-500 border-blue-100 ring-2 ring-blue-50'; return 'bg-primary-500 border-primary-100 ring-2 ring-primary-50'; };
+        const getDotColor = (t) => { if (t === 'food') return 'bg-orange-400 border-orange-100 ring-2 ring-orange-50'; if (t === 'shop') return 'bg-pink-400 border-pink-100 ring-2 ring-pink-50'; if (t === 'transport' || t === 'flight') return 'bg-blue-500 border-blue-100 ring-2 ring-blue-50'; if (t === 'hotel') return 'bg-indigo-400 border-indigo-100 ring-2 ring-indigo-50'; if (t === 'conference') return 'bg-violet-500 border-violet-100 ring-2 ring-violet-50'; return 'bg-primary-500 border-primary-100 ring-2 ring-primary-50'; };
         const updateParticipants = () => { participants.value = participantsStr.value.split(',').map(s => s.trim()).filter(s => s); };
         const isUrl = (str) => { if (!str) return false; try { new URL(str); return true; } catch { return /^https?:\/\//i.test(str); } };
 
@@ -241,6 +242,65 @@ createApp({
             if (idx === -1) return;
             const removed = savedLocations.value.splice(idx, 1)[0];
             showToast('已刪除地點', { icon: 'ph-bold ph-trash', undo: () => { savedLocations.value.splice(Math.min(idx, savedLocations.value.length), 0, removed); } });
+        };
+
+        // ---- 開新旅程：Blank Trip / ASA San Diego 2026 Template（僅在建立新旅程時可選，不影響既有旅程）----
+        const newTripUseAsaTemplate = ref(false);
+        const buildBlankDays = (startDate, dayCount) => {
+            const dNames = ['日', '一', '二', '三', '四', '五', '六'];
+            const [ny, nm, nd] = startDate.split('-').map(Number);
+            const start = new Date(ny, nm - 1, nd);
+            const built = [];
+            for (let i = 0; i < dayCount; i++) {
+                const curr = new Date(start); curr.setDate(start.getDate() + i);
+                const mm = curr.getMonth() + 1; const dd = curr.getDate(); const yyyy = curr.getFullYear();
+                built.push({
+                    date: `${mm < 10 ? '0' + mm : mm}/${dd < 10 ? '0' + dd : dd} (${dNames[curr.getDay()]})`,
+                    shortDate: `${mm}/${dd}`,
+                    fullDate: `${yyyy}-${mm < 10 ? '0' + mm : mm}-${dd < 10 ? '0' + dd : dd}`,
+                    title: i === 0 ? '抵達 & 探索' : '行程規劃',
+                    items: [], flight: null
+                });
+            }
+            return built;
+        };
+        // 可重複使用的範本函式：把 ASA_SD_2026_ITINERARY 純資料展開成 days.value 需要的格式
+        const seedAsaSanDiego2026Days = () => {
+            const dNames = ['日', '一', '二', '三', '四', '五', '六'];
+            const itemsByDate = {};
+            ASA_SD_2026_ITINERARY.forEach(entry => { (itemsByDate[entry.date] = itemsByDate[entry.date] || []).push(entry); });
+            const [ny, nm, nd] = ASA_SD_2026_TRIP_DEFAULTS.startDate.split('-').map(Number);
+            const start = new Date(ny, nm - 1, nd);
+            const built = [];
+            for (let i = 0; i < ASA_SD_2026_TRIP_DEFAULTS.days; i++) {
+                const curr = new Date(start); curr.setDate(start.getDate() + i);
+                const mm = curr.getMonth() + 1; const dd = curr.getDate(); const yyyy = curr.getFullYear();
+                const fullDate = `${yyyy}-${mm < 10 ? '0' + mm : mm}-${dd < 10 ? '0' + dd : dd}`;
+                built.push({
+                    date: `${mm < 10 ? '0' + mm : mm}/${dd < 10 ? '0' + dd : dd} (${dNames[curr.getDay()]})`,
+                    shortDate: `${mm}/${dd}`,
+                    fullDate,
+                    title: i === 0 ? '抵達 & 探索' : '行程規劃',
+                    items: (itemsByDate[fullDate] || []).map(e => ({
+                        id: generateId(), time: e.time, type: e.type, activity: e.activity, location: '', link: '', note: e.note || ''
+                    })),
+                    flight: null
+                });
+            }
+            return built;
+        };
+        const seedAsaSanDiego2026Poster = () => ({
+            id: generateId(), name: ASA_SD_2026_POSTER.name, type: ASA_SD_2026_POSTER.type, link: '', note: ASA_SD_2026_POSTER.note
+        });
+        const useAsaSanDiego2026Template = () => {
+            newTripUseAsaTemplate.value = true;
+            Object.assign(setup.value, ASA_SD_2026_TRIP_DEFAULTS);
+            if (weather.value) weather.value.location = ASA_SD_2026_TRIP_DEFAULTS.destination;
+        };
+        const useBlankTripTemplate = () => {
+            newTripUseAsaTemplate.value = false;
+            setup.value = { destination: '', startDate: '2026-10-14', days: 8, rate: 1, currency: 'USD', langCode: 'en', langName: '英文', mapProvider: 'google' };
+            if (weather.value) weather.value.location = '';
         };
 
         // ---- 旅遊清單（項目共享、每人各勾各的；成員空時退化單一共用框 __shared__）----
@@ -441,6 +501,7 @@ createApp({
             isEditing.value = false;
             showSetupModal.value = true;
             showTripMenu.value = false;
+            newTripUseAsaTemplate.value = false;
             setup.value = { destination: '', startDate: '2026-10-14', days: 8, rate: 1, currency: 'USD', langCode: 'en', langName: '英文', mapProvider: 'google' };
             weather.value.location = '';
             participantsStr.value = '';
@@ -548,27 +609,15 @@ createApp({
                 return;
             }
 
+            // 若選了 ASA San Diego 2026 範本，鎖定成固定的目的地/日期/天數/幣別，避免和固定行程對不上
+            if (newTripUseAsaTemplate.value) { Object.assign(setup.value, ASA_SD_2026_TRIP_DEFAULTS); }
+
             if (weather.value && !weather.value.location) weather.value.location = setup.value.destination;
             if (weather.value && weather.value.location) fetchWeather(weather.value.location);
 
             const newId = generateId();
             const newTripMeta = { id: newId, destination: setup.value.destination, startDate: setup.value.startDate, daysCount: setup.value.days };
-            const newDays = [];
-            const [ny, nm, nd] = setup.value.startDate.split('-').map(Number);
-            const start = new Date(ny, nm - 1, nd);
-            const dNames = ['日', '一', '二', '三', '四', '五', '六'];
-            for (let i = 0; i < setup.value.days; i++) {
-                const curr = new Date(start); curr.setDate(start.getDate() + i);
-                const mm = curr.getMonth() + 1; const dd = curr.getDate(); const yyyy = curr.getFullYear();
-                const fullDate = `${yyyy}-${mm < 10 ? '0' + mm : mm}-${dd < 10 ? '0' + dd : dd}`;
-                newDays.push({
-                    date: `${mm < 10 ? '0' + mm : mm}/${dd < 10 ? '0' + dd : dd} (${dNames[curr.getDay()]})`,
-                    shortDate: `${mm}/${dd}`,
-                    fullDate: fullDate,
-                    title: i === 0 ? '抵達 & 探索' : '行程規劃',
-                    items: [], flight: null
-                });
-            }
+            const newDays = newTripUseAsaTemplate.value ? seedAsaSanDiego2026Days() : buildBlankDays(setup.value.startDate, setup.value.days);
 
             // 防止舊旅程資料被存入新旅程
             ignoreRemoteUpdate = true;
@@ -578,7 +627,7 @@ createApp({
             // 先設定新旅程資料，再切換 ID
             days.value = newDays;
             expenses.value = [];
-            savedLocations.value = [];
+            savedLocations.value = newTripUseAsaTemplate.value ? [seedAsaSanDiego2026Poster()] : [];
             checklist.value = seedChecklist();
             exchangeRate.value = setup.value.rate;
             // 成員已在 setup modal 收好（createNewTrip 開窗時已重置過），此處不可清空
@@ -895,6 +944,7 @@ createApp({
             updateExchangeRate, localDateStr, fmtExpDate,
             weather, getTimePeriod,
             showSetupModal, setup, initTrip, weatherDisplay, detectRate, isRateLoading, currencyLabel, currencySymbol, toggleFlightCard, getDotColor,
+            newTripUseAsaTemplate, useAsaSanDiego2026Template, useBlankTripTemplate,
             showTripMenu, tripList, createNewTrip, switchTrip, archiveTrip, currentTripId,
             allTrips, allTripsStatus, showArchivedTrips, loadAllTrips, otherTrips, archivedTrips, adoptTrip, unarchiveTrip,
             openEditModal, cancelSetupModal, isEditing, mapProviderLabel, amountInputRef, isAmountInvalid, itemInputRef, isItemInvalid, isUrl,

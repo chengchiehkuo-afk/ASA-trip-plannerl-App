@@ -610,6 +610,8 @@
                                                 <span v-else-if="item.type==='food'">🍴</span>
                                                 <span v-else-if="item.type==='shop'">🛍️</span>
                                                 <span v-else-if="item.type==='transport'">🚇</span>
+                                                <span v-else-if="item.type==='hotel'">🏨</span>
+                                                <span v-else-if="item.type==='conference'">🎤</span>
                                                 <span v-else>📍</span>
                                             </div>
                                         </div>
@@ -674,6 +676,8 @@
                                                 <span v-if="loc.type==='food'">🍴</span>
                                                 <span v-else-if="loc.type==='shop'">🛍️</span>
                                                 <span v-else-if="loc.type==='transport'">🚇</span>
+                                                <span v-else-if="loc.type==='hotel'">🏨</span>
+                                                <span v-else-if="loc.type==='conference'">🎤</span>
                                                 <span v-else>📍</span>
                                             </span>
                                             <div class="font-bold text-lg text-stone-800 truncate">{{ loc.name || '未命名地點' }}
@@ -1206,6 +1210,30 @@
                 </div>
 
                 <div class="space-y-5">
+                    <div v-if="!isEditing" class="space-y-2">
+                        <label class="text-xs font-bold text-stone-500 ml-2 uppercase tracking-widest">Trip
+                            Template</label>
+                        <div class="grid grid-cols-2 gap-2">
+                            <button @click="useBlankTripTemplate"
+                                class="rounded-2xl border-2 px-3 py-3 text-left transition-all"
+                                :class="!newTripUseAsaTemplate ? 'bg-stone-800 border-stone-800 text-white shadow-md' : 'bg-stone-50 border-stone-100 text-stone-500 hover:border-stone-200'">
+                                <div class="text-lg leading-none mb-1">📝</div>
+                                <div class="text-sm font-bold">Blank Trip</div>
+                                <div class="text-[10px] opacity-70 mt-0.5">從空白行程開始</div>
+                            </button>
+                            <button @click="useAsaSanDiego2026Template"
+                                class="rounded-2xl border-2 px-3 py-3 text-left transition-all"
+                                :class="newTripUseAsaTemplate ? 'bg-primary-600 border-primary-600 text-white shadow-md' : 'bg-stone-50 border-stone-100 text-stone-500 hover:border-stone-200'">
+                                <div class="text-lg leading-none mb-1">🩺</div>
+                                <div class="text-sm font-bold">ASA San Diego 2026</div>
+                                <div class="text-[10px] opacity-70 mt-0.5">帶入固定行程 / 住宿 / 航班</div>
+                            </button>
+                        </div>
+                        <p v-if="newTripUseAsaTemplate" class="text-[11px] text-primary-600 font-medium ml-2">
+                            已套用 ASA San Diego 2026 範本：10/14–10/21、飯店、航班與 My Presentation 佔位資訊會自動帶入，仍可再手動修改。
+                        </p>
+                    </div>
+
                     <div class="space-y-2 relative">
                         <label
                             class="text-xs font-bold text-stone-500 ml-2 uppercase tracking-widest">Destination</label>
@@ -1351,7 +1379,7 @@
                             <div>
                                 <label class="text-[10px] font-bold text-stone-600 uppercase mb-1 block">類型</label>
                                 <div class="flex h-12 bg-stone-50 p-1 rounded-xl border border-stone-200 items-stretch">
-                                    <button v-for="type in ['spot', 'food', 'shop', 'transport']" :key="type"
+                                    <button v-for="type in ['spot', 'food', 'shop', 'transport', 'hotel', 'conference']" :key="type"
                                         @click="itemModal.draft.type = type"
                                         class="flex-1 rounded-lg flex items-center justify-center text-xl transition-colors"
                                         :class="itemModal.draft.type === type ? 'bg-white shadow-sm scale-100' : 'opacity-40 hover:opacity-100'">
@@ -1359,6 +1387,8 @@
                                         <span v-else-if="type==='food'">🍴</span>
                                         <span v-else-if="type==='shop'">🛍️</span>
                                         <span v-else-if="type==='transport'">🚇</span>
+                                        <span v-else-if="type==='hotel'">🏨</span>
+                                        <span v-else-if="type==='conference'">🎤</span>
                                     </button>
                                 </div>
                             </div>
@@ -1428,7 +1458,7 @@
                         <div>
                             <label class="text-[10px] font-bold text-stone-600 uppercase mb-1 block">類型</label>
                             <div class="flex h-12 bg-stone-50 p-1 rounded-xl border border-stone-200 items-stretch">
-                                <button v-for="type in ['spot', 'food', 'shop', 'transport']" :key="type"
+                                <button v-for="type in ['spot', 'food', 'shop', 'transport', 'hotel', 'conference']" :key="type"
                                     @click="locModal.draft.type = type"
                                     class="flex-1 rounded-lg flex items-center justify-center text-xl transition-colors"
                                     :class="locModal.draft.type === type ? 'bg-white shadow-sm scale-100' : 'opacity-40 hover:opacity-100'">
@@ -1436,6 +1466,8 @@
                                     <span v-else-if="type==='food'">🍴</span>
                                     <span v-else-if="type==='shop'">🛍️</span>
                                     <span v-else-if="type==='transport'">🚇</span>
+                                    <span v-else-if="type==='hotel'">🏨</span>
+                                    <span v-else-if="type==='conference'">🎤</span>
                                 </button>
                             </div>
                         </div>

@@ -1,4 +1,4 @@
-const CACHE_NAME = 'asa-trip-planner-v80';
+const CACHE_NAME = 'asa-trip-planner-v81';
 const ASSETS = [
   './index.html',
   './manifest.json',
@@ -25,7 +25,8 @@ const NO_CACHE_PATTERNS = [
   'api.exchangerate-api.com',
   'firebase',
   'app.js',
-  'checklist-data.js'
+  'checklist-data.js',
+  'asa-trip-template.js'
 ];
 
 // 需要 Network First 的檔案（確保每次開啟都拿最新版）
