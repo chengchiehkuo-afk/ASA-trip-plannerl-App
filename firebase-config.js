@@ -7,10 +7,11 @@
 // 詳細步驟請見 README.md「自行架設教學」
 // ============================================================
 export const firebaseConfig = {
-    apiKey: "YOUR_API_KEY",
-    authDomain: "YOUR_PROJECT_ID.firebaseapp.com",
-    projectId: "YOUR_PROJECT_ID",
-    storageBucket: "YOUR_PROJECT_ID.firebasestorage.app",
-    messagingSenderId: "YOUR_SENDER_ID",
-    appId: "YOUR_APP_ID"
+    export const firebaseConfig = {
+  apiKey: "AIzaSyDAJ-bXz9vimf723TuzGeO8po_zqqBhaAY",
+  authDomain: "asa-trip-planner.firebaseapp.com",
+  projectId: "asa-trip-planner",
+  storageBucket: "asa-trip-planner.firebasestorage.app",
+  messagingSenderId: "231124391953",
+  appId: "1:231124391953:web:e488f51a4e047da98db9b0"
 };
