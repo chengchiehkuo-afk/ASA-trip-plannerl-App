@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { ASA_SD_2026_TRIP_DEFAULTS, ASA_SD_2026_ITINERARY, ASA_SD_2026_POSTER, ASA_SD_2026_FLIGHTS } from '../asa-trip-template.js';
+import { ASA_SD_2026_TRIP_DEFAULTS, ASA_SD_2026_ITINERARY, ASA_SD_2026_POSTER, ASA_SD_2026_FLIGHTS, ASA_SD_2026_BOOKINGS } from '../asa-trip-template.js';
 
 const VALID_TYPES = ['spot', 'food', 'shop', 'transport', 'hotel', 'conference'];
 
@@ -68,5 +68,39 @@ assert.equal(ASA_SD_2026_FLIGHTS.outbound.segments[1].arrivalDateTime, '2026-10-
 assert.equal(ASA_SD_2026_FLIGHTS.return.date, '2026-10-21');
 assert.equal(ASA_SD_2026_FLIGHTS.return.segments[0].departureDateTime, '2026-10-21T18:51');
 assert.ok(ASA_SD_2026_FLIGHTS.return.segments[0].notes.includes('TBD'), '回程未確認的段落需標示 TBD');
+
+// Bookings 用的航班（分開的 date/time 欄位，跟上面 day.flight 用的 ASA_SD_2026_FLIGHTS 是不同形狀）
+const BOOKING_SEGMENT_FIELDS = ['airline', 'flightNumber', 'departureAirport', 'arrivalAirport', 'departureDate', 'departureTime', 'arrivalDate', 'arrivalTime', 'departureTerminal', 'arrivalTerminal', 'segmentNotes'];
+assert.equal(ASA_SD_2026_BOOKINGS.length, 2, '去程/回程各一個 flight booking');
+for (const b of ASA_SD_2026_BOOKINGS) {
+    assert.equal(b.type, 'flight');
+    assert.ok(b.journeyName, '每個 flight booking 需要 journeyName');
+    assert.ok(!('id' in b), '模板不含 id，seed 時才補');
+    assert.equal(typeof b.confirmationNumber, 'string');
+    assert.ok(Array.isArray(b.segments) && b.segments.length > 0, `${b.journeyName} 至少要有一個 segment`);
+    for (const seg of b.segments) {
+        assert.ok(!('id' in seg), '模板不含 id，seed 時才補');
+        for (const field of BOOKING_SEGMENT_FIELDS) {
+            assert.ok(field in seg, `booking segment 缺少欄位 ${field}（${b.journeyName}）`);
+        }
+    }
+}
+const outboundBooking = ASA_SD_2026_BOOKINGS.find(b => b.journeyName.includes('去程'));
+assert.equal(outboundBooking.segments.length, 2, '去程 booking 需要 2 個 segment（BR8, AS740）');
+assert.equal(outboundBooking.segments[0].airline, 'EVA Air');
+assert.equal(outboundBooking.segments[0].flightNumber, 'BR8');
+assert.equal(outboundBooking.segments[0].departureDate, '2026-10-14');
+assert.equal(outboundBooking.segments[0].departureTime, '10:15');
+assert.equal(outboundBooking.segments[0].arrivalDate, '2026-10-14');
+assert.equal(outboundBooking.segments[0].arrivalTime, '06:35');
+assert.equal(outboundBooking.segments[1].airline, 'Alaska Airlines');
+assert.equal(outboundBooking.segments[1].flightNumber, 'AS740');
+assert.equal(outboundBooking.segments[1].arrivalTime, '12:23');
+const returnBooking = ASA_SD_2026_BOOKINGS.find(b => b.journeyName.includes('回程'));
+assert.equal(returnBooking.segments[0].departureAirport, 'SAN');
+assert.equal(returnBooking.segments[0].departureDate, '2026-10-21');
+assert.equal(returnBooking.segments[0].departureTime, '18:51');
+assert.equal(returnBooking.segments[0].arrivalAirport, '', '回程抵達段尚未確認，保持空白等使用者補上');
+assert.ok(returnBooking.notes.includes('TBD'), '回程 booking 需標示 TBD 待補資訊');
 
 console.log('asa-trip-template.test.mjs: all assertions passed ✓');

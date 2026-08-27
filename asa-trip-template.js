@@ -81,3 +81,30 @@ export const ASA_SD_2026_FLIGHTS = {
         ],
     },
 };
+
+// 訂位與票券總表（Bookings）用的航班資料：跟上面 ASA_SD_2026_FLIGHTS（掛在 day.flight，itinerary 卡片用）
+// 是分開的兩份資料——欄位形狀不同（這裡是分開的 date/time，不是 datetime-local），故意不共用，避免形狀混淆。
+// id 沒有先補——seed 時（見 app.js 的 seedAsaSanDiego2026Bookings）才補，跟其他模板套路一致。
+export const ASA_SD_2026_BOOKINGS = [
+    {
+        type: 'flight',
+        journeyName: '去程｜Taipei → San Diego',
+        confirmationNumber: '',
+        bookedBy: '',
+        notes: '',
+        segments: [
+            { airline: 'EVA Air', flightNumber: 'BR8', departureAirport: 'TPE', arrivalAirport: 'SFO', departureDate: '2026-10-14', departureTime: '10:15', arrivalDate: '2026-10-14', arrivalTime: '06:35', departureTerminal: '', arrivalTerminal: '', segmentNotes: '' },
+            { airline: 'Alaska Airlines', flightNumber: 'AS740', departureAirport: 'SFO', arrivalAirport: 'SAN', departureDate: '2026-10-14', departureTime: '10:40', arrivalDate: '2026-10-14', arrivalTime: '12:23', departureTerminal: '', arrivalTerminal: '', segmentNotes: '' },
+        ],
+    },
+    {
+        type: 'flight',
+        journeyName: '回程｜San Diego → Taipei',
+        confirmationNumber: '',
+        bookedBy: '',
+        notes: 'TBD：回程其餘航段（轉機／抵達）尚未確認，請自行補上。',
+        segments: [
+            { airline: '', flightNumber: '', departureAirport: 'SAN', arrivalAirport: '', departureDate: '2026-10-21', departureTime: '18:51', arrivalDate: '', arrivalTime: '', departureTerminal: '', arrivalTerminal: '', segmentNotes: '' },
+        ],
+    },
+];

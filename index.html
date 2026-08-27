@@ -698,35 +698,108 @@
                     <div v-for="b in sortedBookings" :key="b.id"
                         class="bg-white rounded-2xl shadow-sm border border-stone-100 p-4 space-y-2 cursor-pointer active:bg-stone-50"
                         @click="openBookingModal(b)">
-                        <div class="flex items-start justify-between gap-2">
-                            <div class="flex items-center gap-2 min-w-0">
-                                <span class="w-9 h-9 rounded-xl bg-primary-50 text-primary-500 flex items-center justify-center shrink-0">
-                                    <i :class="(BOOKING_TYPE_META[b.type] || BOOKING_TYPE_META.other).icon"></i>
-                                </span>
-                                <div class="min-w-0">
-                                    <div class="font-bold text-stone-800 truncate">{{ b.title || '未命名' }}</div>
-                                    <div class="text-xs text-stone-400">
-                                        {{ (BOOKING_TYPE_META[b.type] || BOOKING_TYPE_META.other).label }}
-                                        <span v-if="b.date"> ・ {{ b.date }}{{ b.time ? ' ' + b.time : '' }}</span>
-                                    </div>
+
+                        <!-- 航班：journey + 多航段 -->
+                        <template v-if="b.type === 'flight'">
+                            <div class="flex items-start justify-between gap-2">
+                                <div class="flex items-center gap-2 min-w-0">
+                                    <span class="w-9 h-9 rounded-xl bg-primary-50 text-primary-500 flex items-center justify-center shrink-0">
+                                        <i class="ph-bold ph-airplane-tilt"></i>
+                                    </span>
+                                    <div class="font-bold text-stone-800 truncate">{{ b.journeyName || '未命名航程' }}</div>
                                 </div>
+                                <i class="ph-bold ph-pencil-simple text-stone-300 shrink-0"></i>
                             </div>
-                            <i class="ph-bold ph-pencil-simple text-stone-300 shrink-0"></i>
-                        </div>
-                        <div v-if="b.location" class="text-xs text-stone-500 flex items-center gap-1">
-                            <i class="ph-bold ph-map-pin"></i> {{ b.location }}
-                        </div>
-                        <div class="flex items-center justify-between gap-2 flex-wrap text-xs">
-                            <span v-if="b.bookedBy" class="bg-stone-50 text-stone-500 font-bold px-2 py-1 rounded-full">{{ b.bookedBy }} 訂的</span>
-                            <span v-if="b.cost" class="bg-stone-50 text-stone-500 font-bold px-2 py-1 rounded-full">{{ b.cost }}</span>
-                            <span class="flex items-center gap-1.5 ml-auto" @click.stop>
-                                <span class="text-stone-400 font-bold">確認碼</span>
+                            <div class="flex items-center gap-1.5 text-xs" @click.stop>
+                                <span class="text-stone-400 font-bold">Booking ref</span>
                                 <span class="font-mono font-bold text-stone-600">{{ revealedBookingConfirmations[b.id] ? (b.confirmationNumber || '未填寫') : (b.confirmationNumber ? '••••••' : '未填寫') }}</span>
                                 <button v-if="b.confirmationNumber" @click="toggleBookingConfirmation(b.id)" class="text-primary-500 font-bold">
                                     {{ revealedBookingConfirmations[b.id] ? '隱藏' : '顯示' }}
                                 </button>
-                            </span>
-                        </div>
+                            </div>
+                            <div v-if="b.bookedBy" class="text-xs">
+                                <span class="bg-stone-50 text-stone-500 font-bold px-2 py-1 rounded-full">{{ b.bookedBy }} 訂的</span>
+                            </div>
+                            <div class="bg-stone-50 rounded-xl p-2.5 space-y-1.5">
+                                <template v-for="(seg, idx) in b.segments" :key="seg.id">
+                                    <div class="text-sm font-bold text-stone-700">
+                                        <span class="text-primary-600">{{ seg.flightNumber || '航班未定' }}</span>
+                                        <span v-if="seg.airline" class="text-stone-400 font-medium text-xs">（{{ seg.airline }}）</span>
+                                        ｜{{ seg.departureAirport || '?' }} {{ formatBookingSegDateTime(seg.departureDate, seg.departureTime) }}
+                                        → {{ seg.arrivalAirport || '?' }} {{ formatBookingSegDateTime(seg.arrivalDate, seg.arrivalTime) }}
+                                    </div>
+                                    <div v-if="idx < b.segments.length - 1 && bookingLayover(seg, b.segments[idx + 1])" class="flex justify-center">
+                                        <span class="text-[11px] font-bold text-amber-700 bg-amber-50 rounded-full py-0.5 px-3">{{ bookingLayover(seg, b.segments[idx + 1]) }}</span>
+                                    </div>
+                                </template>
+                            </div>
+                        </template>
+
+                        <!-- 飯店 -->
+                        <template v-else-if="b.type === 'hotel'">
+                            <div class="flex items-start justify-between gap-2">
+                                <div class="flex items-center gap-2 min-w-0">
+                                    <span class="w-9 h-9 rounded-xl bg-primary-50 text-primary-500 flex items-center justify-center shrink-0">
+                                        <i class="ph-bold ph-bed"></i>
+                                    </span>
+                                    <div class="min-w-0">
+                                        <div class="font-bold text-stone-800 truncate">{{ b.hotelName || '未命名飯店' }}</div>
+                                        <div v-if="b.checkInDate || b.checkOutDate" class="text-xs text-stone-400">
+                                            {{ b.checkInDate || '?' }} → {{ b.checkOutDate || '?' }}
+                                        </div>
+                                    </div>
+                                </div>
+                                <i class="ph-bold ph-pencil-simple text-stone-300 shrink-0"></i>
+                            </div>
+                            <div v-if="b.location" class="text-xs text-stone-500 flex items-center gap-1">
+                                <i class="ph-bold ph-map-pin"></i> {{ b.location }}
+                            </div>
+                            <div class="flex items-center justify-between gap-2 flex-wrap text-xs">
+                                <span v-if="b.bookedBy" class="bg-stone-50 text-stone-500 font-bold px-2 py-1 rounded-full">{{ b.bookedBy }} 訂的</span>
+                                <span v-if="b.cost" class="bg-stone-50 text-stone-500 font-bold px-2 py-1 rounded-full">{{ b.cost }}</span>
+                                <span class="flex items-center gap-1.5 ml-auto" @click.stop>
+                                    <span class="text-stone-400 font-bold">確認碼</span>
+                                    <span class="font-mono font-bold text-stone-600">{{ revealedBookingConfirmations[b.id] ? (b.confirmationNumber || '未填寫') : (b.confirmationNumber ? '••••••' : '未填寫') }}</span>
+                                    <button v-if="b.confirmationNumber" @click="toggleBookingConfirmation(b.id)" class="text-primary-500 font-bold">
+                                        {{ revealedBookingConfirmations[b.id] ? '隱藏' : '顯示' }}
+                                    </button>
+                                </span>
+                            </div>
+                        </template>
+
+                        <!-- 餐廳訂位／票券／其他：通用欄位 -->
+                        <template v-else>
+                            <div class="flex items-start justify-between gap-2">
+                                <div class="flex items-center gap-2 min-w-0">
+                                    <span class="w-9 h-9 rounded-xl bg-primary-50 text-primary-500 flex items-center justify-center shrink-0">
+                                        <i :class="(BOOKING_TYPE_META[b.type] || BOOKING_TYPE_META.other).icon"></i>
+                                    </span>
+                                    <div class="min-w-0">
+                                        <div class="font-bold text-stone-800 truncate">{{ b.title || '未命名' }}</div>
+                                        <div class="text-xs text-stone-400">
+                                            {{ (BOOKING_TYPE_META[b.type] || BOOKING_TYPE_META.other).label }}
+                                            <span v-if="b.date"> ・ {{ b.date }}{{ b.time ? ' ' + b.time : '' }}</span>
+                                        </div>
+                                    </div>
+                                </div>
+                                <i class="ph-bold ph-pencil-simple text-stone-300 shrink-0"></i>
+                            </div>
+                            <div v-if="b.location" class="text-xs text-stone-500 flex items-center gap-1">
+                                <i class="ph-bold ph-map-pin"></i> {{ b.location }}
+                            </div>
+                            <div class="flex items-center justify-between gap-2 flex-wrap text-xs">
+                                <span v-if="b.bookedBy" class="bg-stone-50 text-stone-500 font-bold px-2 py-1 rounded-full">{{ b.bookedBy }} 訂的</span>
+                                <span v-if="b.cost" class="bg-stone-50 text-stone-500 font-bold px-2 py-1 rounded-full">{{ b.cost }}</span>
+                                <span class="flex items-center gap-1.5 ml-auto" @click.stop>
+                                    <span class="text-stone-400 font-bold">確認碼</span>
+                                    <span class="font-mono font-bold text-stone-600">{{ revealedBookingConfirmations[b.id] ? (b.confirmationNumber || '未填寫') : (b.confirmationNumber ? '••••••' : '未填寫') }}</span>
+                                    <button v-if="b.confirmationNumber" @click="toggleBookingConfirmation(b.id)" class="text-primary-500 font-bold">
+                                        {{ revealedBookingConfirmations[b.id] ? '隱藏' : '顯示' }}
+                                    </button>
+                                </span>
+                            </div>
+                        </template>
+
                         <div v-if="b.notes" class="text-xs text-stone-500 whitespace-pre-wrap">{{ b.notes }}</div>
                     </div>
 
@@ -946,6 +1019,193 @@
                             </div>
                         </div>
                     </div>
+                </div>
+
+                <div v-else-if="viewMode === 'conference'" key="conference"
+                    class="view-pane p-5 pb-32 space-y-4 flex-1 overflow-y-auto hide-scroll">
+                    <div class="mb-2">
+                        <h2 class="text-2xl font-black text-stone-800 flex items-center gap-2">
+                            <i class="ph-bold ph-microphone-stage text-primary-500 text-2xl"></i> ASA 議程
+                        </h2>
+                        <p class="text-sm text-stone-500 pl-1">官方議程還沒公開？可以先手動建立，或等公開後貼上匯入</p>
+                    </div>
+
+                    <div class="flex bg-stone-100 p-1 rounded-2xl">
+                        <button @click="conferenceSubView = 'sessions'" class="flex-1 py-2 rounded-xl text-sm font-bold transition"
+                            :class="conferenceSubView === 'sessions' ? 'bg-white shadow-sm text-primary-600' : 'text-stone-400'">Sessions</button>
+                        <button @click="conferenceSubView = 'venues'" class="flex-1 py-2 rounded-xl text-sm font-bold transition"
+                            :class="conferenceSubView === 'venues' ? 'bg-white shadow-sm text-primary-600' : 'text-stone-400'">場地索引</button>
+                        <button @click="conferenceSubView = 'presentation'" class="flex-1 py-2 rounded-xl text-sm font-bold transition"
+                            :class="conferenceSubView === 'presentation' ? 'bg-white shadow-sm text-primary-600' : 'text-stone-400'">My Presentation</button>
+                    </div>
+
+                    <!-- ===== Sessions ===== -->
+                    <template v-if="conferenceSubView === 'sessions'">
+                        <div class="flex gap-2">
+                            <div class="flex-1 flex items-center gap-2 bg-white rounded-xl px-3 py-2.5 border border-stone-100">
+                                <i class="ph-bold ph-magnifying-glass text-stone-400"></i>
+                                <input v-model="sessionSearchQuery" placeholder="搜尋標題/講者/房間"
+                                    class="flex-1 min-w-0 text-sm bg-transparent focus:outline-none">
+                            </div>
+                            <select v-model="sessionCategoryFilter"
+                                class="text-sm bg-white border border-stone-100 rounded-xl px-2 focus:ring-2 focus:ring-primary-100">
+                                <option value="">全部分類</option>
+                                <option v-for="c in TOPIC_CATEGORIES" :key="c.value" :value="c.value">{{ c.label }}</option>
+                            </select>
+                        </div>
+
+                        <details class="bg-white rounded-2xl border border-stone-100 p-3">
+                            <summary class="text-sm font-bold text-stone-600 cursor-pointer flex items-center gap-1.5">
+                                <i class="ph-bold ph-upload-simple"></i> 匯入議程（JSON / CSV）
+                            </summary>
+                            <div class="mt-3 space-y-2">
+                                <div class="flex gap-2 text-xs font-bold">
+                                    <button @click="importSessionFormat = 'json'" class="px-3 py-1 rounded-full"
+                                        :class="importSessionFormat === 'json' ? 'bg-primary-100 text-primary-700' : 'bg-stone-100 text-stone-400'">JSON</button>
+                                    <button @click="importSessionFormat = 'csv'" class="px-3 py-1 rounded-full"
+                                        :class="importSessionFormat === 'csv' ? 'bg-primary-100 text-primary-700' : 'bg-stone-100 text-stone-400'">CSV</button>
+                                </div>
+                                <p class="text-[10px] text-stone-400 leading-relaxed">
+                                    <span v-if="importSessionFormat === 'json'">貼上一個 JSON 陣列，每筆物件可包含
+                                        title/date/startTime/endTime/room/location/sessionType/topicCategory/speakers/description/sourceUrl/sessionId
+                                        等欄位（缺的欄位留空即可，之後仍可編輯補齊）。</span>
+                                    <span v-else>第一列是標題列，欄位名稱同上（例如
+                                        title,date,startTime,endTime,room,location,sessionType,topicCategory,speakers,description,sourceUrl,sessionId），之後每列一筆。</span>
+                                </p>
+                                <textarea v-model="importSessionText" rows="4"
+                                    class="w-full text-xs font-mono bg-stone-50 border border-stone-200 rounded-xl px-3 py-2 focus:ring-2 focus:ring-primary-100 resize-none"
+                                    :placeholder="importSessionFormat === 'json' ? '[{&quot;title&quot;:&quot;...&quot;,&quot;date&quot;:&quot;2026-10-17&quot;}]' : 'title,date,startTime,...'"></textarea>
+                                <button @click="importSessions"
+                                    class="w-full py-2 bg-primary-500 text-white rounded-xl text-sm font-bold hover:bg-primary-600 transition">匯入</button>
+                            </div>
+                        </details>
+
+                        <div v-if="!conferenceSessions.length"
+                            class="bg-white rounded-3xl border border-stone-100 shadow-soft p-8 text-center space-y-2">
+                            <i class="ph-bold ph-microphone-stage text-5xl text-stone-200"></i>
+                            <p class="text-sm text-stone-500 leading-relaxed">還沒有任何議程資料，等 ASA 官方公布後可以匯入，或先手動建立幾筆</p>
+                        </div>
+
+                        <div v-for="s in filteredSessions" :key="s.id" @click="openSessionModal(s)"
+                            class="bg-white rounded-2xl shadow-sm border border-stone-100 p-4 space-y-2 cursor-pointer active:bg-stone-50">
+                            <div class="flex items-start justify-between gap-2">
+                                <div class="min-w-0">
+                                    <div class="flex items-center gap-1.5 flex-wrap">
+                                        <span class="font-bold text-stone-800">{{ s.title || '未命名 Session' }}</span>
+                                        <span v-if="isRecommendedCandidate(s)"
+                                            class="text-[10px] font-bold px-1.5 py-0.5 rounded-full bg-amber-50 text-amber-600 border border-amber-100">推薦候選</span>
+                                        <span v-if="conflictingSessionIds.has(s.id)"
+                                            class="text-[10px] font-bold px-1.5 py-0.5 rounded-full bg-red-50 text-red-500 border border-red-100 flex items-center gap-0.5">
+                                            <i class="ph-bold ph-warning"></i> 時間重疊</span>
+                                    </div>
+                                    <div class="text-xs text-stone-400 mt-0.5">
+                                        <span v-if="s.date">{{ s.date }}</span>
+                                        <span v-if="s.startTime"> {{ s.startTime }}{{ s.endTime ? '–' + s.endTime : '' }}</span>
+                                        <span v-if="s.room || s.location"> ・ {{ s.room || s.location }}</span>
+                                    </div>
+                                </div>
+                                <i class="ph-bold ph-pencil-simple text-stone-300 shrink-0"></i>
+                            </div>
+                            <div class="flex items-center gap-1.5 flex-wrap text-[11px]">
+                                <span v-if="s.sessionType" class="bg-stone-50 text-stone-500 font-bold px-2 py-0.5 rounded-full">{{ sessionTypeLabel(s.sessionType) }}</span>
+                                <span v-if="s.topicCategory" class="bg-stone-50 text-stone-500 font-bold px-2 py-0.5 rounded-full">{{ topicCategoryLabel(s.topicCategory) }}</span>
+                                <span v-if="s.priority" class="font-bold px-2 py-0.5 rounded-full border" :class="SESSION_PRIORITY_META[s.priority]?.cls">{{ SESSION_PRIORITY_META[s.priority]?.label }}</span>
+                                <span v-if="s.status === 'attended'" class="bg-green-50 text-green-600 font-bold px-2 py-0.5 rounded-full">已參加</span>
+                                <span v-else-if="s.status === 'skipped'" class="bg-stone-100 text-stone-400 font-bold px-2 py-0.5 rounded-full">已跳過</span>
+                            </div>
+                            <div v-if="s.speakers" class="text-xs text-stone-500">講者：{{ s.speakers }}</div>
+                            <button v-if="isSessionInItinerary(s)" @click.stop="removeSessionFromItinerary(s)"
+                                class="w-full py-2 bg-primary-50 text-primary-600 rounded-xl text-xs font-bold flex items-center justify-center gap-1">
+                                <i class="ph-bold ph-calendar-check"></i> 已加入我的行程（點此移除）
+                            </button>
+                            <button v-else @click.stop="addSessionToItinerary(s)"
+                                class="w-full py-2 border border-dashed border-primary-200 text-primary-500 rounded-xl text-xs font-bold hover:bg-primary-50 transition flex items-center justify-center gap-1">
+                                <i class="ph-bold ph-plus"></i> 加入我的行程
+                            </button>
+                        </div>
+
+                        <button @click="openSessionModal()"
+                            class="w-full py-4 border-2 border-dashed border-stone-300 rounded-2xl text-stone-500 hover:border-primary-400 hover:text-primary-600 hover:bg-primary-50 transition flex items-center justify-center gap-2 font-bold">
+                            <i class="ph-bold ph-plus"></i> 手動新增議程
+                        </button>
+                    </template>
+
+                    <!-- ===== 場地索引 ===== -->
+                    <template v-else-if="conferenceSubView === 'venues'">
+                        <div v-if="!conferenceVenues.length"
+                            class="bg-white rounded-3xl border border-stone-100 shadow-soft p-8 text-center space-y-2">
+                            <i class="ph-bold ph-map-trifold text-5xl text-stone-200"></i>
+                            <p class="text-sm text-stone-500 leading-relaxed">還沒有場地/房間資料</p>
+                        </div>
+                        <div v-for="v in conferenceVenues" :key="v.id" @click="openVenueModal(v)"
+                            class="bg-white rounded-2xl shadow-sm border border-stone-100 p-4 space-y-1 cursor-pointer active:bg-stone-50">
+                            <div class="flex items-start justify-between gap-2">
+                                <div class="font-bold text-stone-800">{{ v.roomName || '未命名場地' }}</div>
+                                <i class="ph-bold ph-pencil-simple text-stone-300 shrink-0"></i>
+                            </div>
+                            <div v-if="v.level || v.area" class="text-xs text-stone-400">{{ v.level }}{{ v.level && v.area ? ' ・ ' : '' }}{{ v.area }}</div>
+                            <a v-if="v.mapLink" :href="getExternalMapLink(v.mapLink)" target="_blank" @click.stop
+                                class="inline-flex items-center gap-1 text-xs font-bold text-primary-600">
+                                <i class="ph-bold ph-map-pin"></i> 開啟地圖
+                            </a>
+                            <div v-if="v.notes" class="text-xs text-stone-500 whitespace-pre-wrap">{{ v.notes }}</div>
+                        </div>
+                        <button @click="openVenueModal()"
+                            class="w-full py-4 border-2 border-dashed border-stone-300 rounded-2xl text-stone-500 hover:border-primary-400 hover:text-primary-600 hover:bg-primary-50 transition flex items-center justify-center gap-2 font-bold">
+                            <i class="ph-bold ph-plus"></i> 新增場地
+                        </button>
+                    </template>
+
+                    <!-- ===== My Presentation ===== -->
+                    <template v-else-if="conferenceSubView === 'presentation'">
+                        <div class="bg-white rounded-3xl shadow-soft border border-stone-100 p-5 space-y-3">
+                            <div>
+                                <label class="text-[10px] font-bold text-stone-600 uppercase mb-1 block">Poster Title</label>
+                                <textarea v-model="myPresentation.title" rows="2"
+                                    class="w-full text-sm font-bold text-stone-800 bg-stone-50 rounded-xl px-3 py-2 border-none focus:ring-2 focus:ring-primary-100 resize-none"
+                                    placeholder="Poster title"></textarea>
+                            </div>
+                            <div class="grid grid-cols-2 gap-2">
+                                <div>
+                                    <label class="text-[10px] font-bold text-stone-600 uppercase mb-1 block">Date</label>
+                                    <input v-model="myPresentation.date" type="date"
+                                        class="w-full text-sm bg-stone-50 border border-stone-200 rounded-xl px-3 py-2 focus:ring-2 focus:ring-primary-100">
+                                </div>
+                                <div>
+                                    <label class="text-[10px] font-bold text-stone-600 uppercase mb-1 block">Time</label>
+                                    <input v-model="myPresentation.time" type="time"
+                                        class="w-full text-sm bg-stone-50 border border-stone-200 rounded-xl px-3 py-2 focus:ring-2 focus:ring-primary-100">
+                                </div>
+                            </div>
+                            <div>
+                                <label class="text-[10px] font-bold text-stone-600 uppercase mb-1 block">Location</label>
+                                <input v-model="myPresentation.location" placeholder="TBD"
+                                    class="w-full text-sm bg-stone-50 border border-stone-200 rounded-xl px-3 py-2 focus:ring-2 focus:ring-primary-100">
+                            </div>
+                            <div class="grid grid-cols-2 gap-2">
+                                <div>
+                                    <label class="text-[10px] font-bold text-stone-600 uppercase mb-1 block">Poster Number</label>
+                                    <input v-model="myPresentation.posterNumber" placeholder="TBD"
+                                        class="w-full text-sm bg-stone-50 border border-stone-200 rounded-xl px-3 py-2 focus:ring-2 focus:ring-primary-100">
+                                </div>
+                                <div>
+                                    <label class="text-[10px] font-bold text-stone-600 uppercase mb-1 block">Upload Deadline</label>
+                                    <input v-model="myPresentation.uploadDeadline" placeholder="TBD"
+                                        class="w-full text-sm bg-stone-50 border border-stone-200 rounded-xl px-3 py-2 focus:ring-2 focus:ring-primary-100">
+                                </div>
+                            </div>
+                            <div>
+                                <label class="text-[10px] font-bold text-stone-600 uppercase mb-1 block">Check-in Requirement</label>
+                                <input v-model="myPresentation.checkInRequirement" placeholder="TBD"
+                                    class="w-full text-sm bg-stone-50 border border-stone-200 rounded-xl px-3 py-2 focus:ring-2 focus:ring-primary-100">
+                            </div>
+                            <div>
+                                <label class="text-[10px] font-bold text-stone-600 uppercase mb-1 block">Notes</label>
+                                <textarea v-model="myPresentation.notes" rows="3"
+                                    class="w-full text-sm bg-stone-50 border border-stone-200 rounded-xl px-3 py-2 focus:ring-2 focus:ring-primary-100 resize-none"></textarea>
+                            </div>
+                        </div>
+                    </template>
                 </div>
 
                 <div v-else-if="viewMode === 'checklist'" key="checklist"
@@ -1182,6 +1442,13 @@
                         :class="viewMode === 'money' ? '' : 'opacity-40'"><i class="ph-bold ph-wallet"
                             style="font-size:1.55rem"></i></span><span
                         class="text-[12px] font-bold leading-none">記帳</span></button>
+                <button @click="viewMode = 'conference'"
+                    class="flex-1 flex flex-col items-center justify-center gap-0.5 py-1.5 rounded-2xl transition-all active:scale-95"
+                    :class="viewMode === 'conference' ? 'bg-primary-50 text-primary-600' : 'text-stone-400'">
+                    <span class="flex items-center justify-center transition-all" style="width:1.9rem;height:1.9rem"
+                        :class="viewMode === 'conference' ? '' : 'opacity-40'"><i class="ph-bold ph-microphone-stage"
+                            style="font-size:1.55rem"></i></span><span
+                        class="text-[12px] font-bold leading-none">議程</span></button>
                 <button @click="viewMode = 'checklist'"
                     class="flex-1 flex flex-col items-center justify-center gap-0.5 py-1.5 rounded-2xl transition-all active:scale-95"
                     :class="viewMode === 'checklist' ? 'bg-primary-50 text-primary-600' : 'text-stone-400'">
@@ -1811,7 +2078,7 @@
                     <div v-if="bookingModal.draft" class="p-5 space-y-4">
                         <div class="grid grid-cols-5 gap-1 bg-stone-50 p-1 rounded-xl border border-stone-200">
                             <button v-for="(meta, key) in BOOKING_TYPE_META" :key="key"
-                                @click="bookingModal.draft.type = key"
+                                @click="switchBookingDraftType(key)"
                                 class="rounded-lg flex flex-col items-center justify-center py-1.5 transition-colors"
                                 :class="bookingModal.draft.type === key ? 'bg-white shadow-sm' : 'opacity-40 hover:opacity-100'">
                                 <i :class="meta.icon" class="text-base"></i>
@@ -1819,40 +2086,159 @@
                             </button>
                         </div>
 
-                        <input v-model="bookingModal.draft.title"
-                            class="js-booking-title w-full font-bold text-lg text-stone-800 bg-stone-50 rounded-xl px-3 py-2.5 border-none focus:ring-2 focus:ring-primary-200 placeholder:text-stone-300"
-                            placeholder="名稱（飯店/航班/餐廳/票券名稱）">
+                        <!-- 飯店專用欄位 -->
+                        <template v-if="bookingModal.draft.type === 'hotel'">
+                            <input v-model="bookingModal.draft.hotelName"
+                                class="js-booking-title w-full font-bold text-lg text-stone-800 bg-stone-50 rounded-xl px-3 py-2.5 border-none focus:ring-2 focus:ring-primary-200 placeholder:text-stone-300"
+                                placeholder="飯店名稱">
+                            <div class="grid grid-cols-2 gap-2">
+                                <div>
+                                    <label class="text-[9px] text-stone-400 font-bold block mb-0.5">Check-in</label>
+                                    <input v-model="bookingModal.draft.checkInDate" type="date"
+                                        class="w-full text-sm bg-stone-50 border border-stone-200 rounded-xl px-3 py-2.5 focus:ring-2 focus:ring-primary-100">
+                                </div>
+                                <div>
+                                    <label class="text-[9px] text-stone-400 font-bold block mb-0.5">Check-out</label>
+                                    <input v-model="bookingModal.draft.checkOutDate" type="date"
+                                        class="w-full text-sm bg-stone-50 border border-stone-200 rounded-xl px-3 py-2.5 focus:ring-2 focus:ring-primary-100">
+                                </div>
+                            </div>
+                            <div class="flex items-center gap-2 bg-stone-50 rounded-xl px-3 py-2 border border-stone-100 focus-within:border-primary-200 focus-within:bg-white transition-colors">
+                                <i class="ph-bold ph-map-pin text-stone-500 shrink-0"></i>
+                                <input v-model="bookingModal.draft.location"
+                                    class="flex-1 min-w-0 text-sm font-medium bg-transparent focus:outline-none text-stone-700"
+                                    placeholder="地點（可選）">
+                            </div>
+                            <div class="grid grid-cols-2 gap-2">
+                                <select v-model="bookingModal.draft.bookedBy"
+                                    class="text-sm bg-stone-50 border border-stone-200 rounded-xl px-3 py-2.5 focus:ring-2 focus:ring-primary-100">
+                                    <option value="">誰訂的（可選）</option>
+                                    <option v-for="p in participants" :value="p">{{ p }}</option>
+                                </select>
+                                <input v-model="bookingModal.draft.cost" placeholder="費用（可選）"
+                                    class="text-sm bg-stone-50 border border-stone-200 rounded-xl px-3 py-2.5 focus:ring-2 focus:ring-primary-100">
+                            </div>
+                            <div>
+                                <label class="text-[10px] font-bold text-stone-600 uppercase mb-1 block">確認碼</label>
+                                <input v-model="bookingModal.draft.confirmationNumber" placeholder="Confirmation Number"
+                                    class="w-full text-sm bg-stone-50 border border-stone-200 rounded-xl px-3 py-2.5 font-mono focus:ring-2 focus:ring-primary-100">
+                                <p class="text-[10px] text-stone-400 mt-1">瀏覽時會預設遮蔽（••••••），要按「顯示」才會展開，不會直接出現在行程摘要上。</p>
+                            </div>
+                        </template>
 
-                        <div class="grid grid-cols-2 gap-2">
-                            <input v-model="bookingModal.draft.date" type="date"
-                                class="text-sm bg-stone-50 border border-stone-200 rounded-xl px-3 py-2.5 focus:ring-2 focus:ring-primary-100">
-                            <input v-model="bookingModal.draft.time" type="time"
-                                class="text-sm bg-stone-50 border border-stone-200 rounded-xl px-3 py-2.5 focus:ring-2 focus:ring-primary-100">
-                        </div>
+                        <!-- 航班專用欄位：journey + 多航段 -->
+                        <template v-else-if="bookingModal.draft.type === 'flight'">
+                            <input v-model="bookingModal.draft.journeyName"
+                                class="js-booking-journey-name w-full font-bold text-lg text-stone-800 bg-stone-50 rounded-xl px-3 py-2.5 border-none focus:ring-2 focus:ring-primary-200 placeholder:text-stone-300"
+                                placeholder="去程｜Taipei → San Diego">
+                            <div class="grid grid-cols-2 gap-2">
+                                <select v-model="bookingModal.draft.bookedBy"
+                                    class="text-sm bg-stone-50 border border-stone-200 rounded-xl px-3 py-2.5 focus:ring-2 focus:ring-primary-100">
+                                    <option value="">誰訂的（可選）</option>
+                                    <option v-for="p in participants" :value="p">{{ p }}</option>
+                                </select>
+                                <input v-model="bookingModal.draft.confirmationNumber" placeholder="Booking Reference"
+                                    class="text-sm bg-stone-50 border border-stone-200 rounded-xl px-3 py-2.5 font-mono focus:ring-2 focus:ring-primary-100">
+                            </div>
+                            <p class="text-[10px] text-stone-400 -mt-2">Booking ref 瀏覽時會預設遮蔽，要按「顯示」才會展開。</p>
 
-                        <div class="flex items-center gap-2 bg-stone-50 rounded-xl px-3 py-2 border border-stone-100 focus-within:border-primary-200 focus-within:bg-white transition-colors">
-                            <i class="ph-bold ph-map-pin text-stone-500 shrink-0"></i>
-                            <input v-model="bookingModal.draft.location"
-                                class="flex-1 min-w-0 text-sm font-medium bg-transparent focus:outline-none text-stone-700"
-                                placeholder="地點（可選）">
-                        </div>
+                            <div v-for="(seg, idx) in bookingModal.draft.segments" :key="seg.id" class="bg-stone-50 rounded-2xl p-3 space-y-2 border border-stone-100">
+                                <div class="flex items-center justify-between">
+                                    <span class="text-xs font-bold text-stone-400">航段 {{ idx + 1 }}</span>
+                                    <div class="flex items-center gap-1">
+                                        <button v-if="idx > 0" @click="moveFlightSegment(bookingModal.draft, seg.id, -1)" aria-label="上移"
+                                            class="w-6 h-6 flex items-center justify-center text-stone-400 hover:text-primary-500"><i class="ph-bold ph-arrow-up text-sm"></i></button>
+                                        <button v-if="idx < bookingModal.draft.segments.length - 1" @click="moveFlightSegment(bookingModal.draft, seg.id, 1)" aria-label="下移"
+                                            class="w-6 h-6 flex items-center justify-center text-stone-400 hover:text-primary-500"><i class="ph-bold ph-arrow-down text-sm"></i></button>
+                                        <button v-if="bookingModal.draft.segments.length > 1" @click="removeFlightSegment(bookingModal.draft, seg.id)" aria-label="刪除此航段"
+                                            class="w-6 h-6 flex items-center justify-center text-red-300 hover:text-red-500"><i class="ph-bold ph-x text-sm"></i></button>
+                                    </div>
+                                </div>
+                                <div class="grid grid-cols-2 gap-2">
+                                    <input v-model="seg.airline" placeholder="航空公司 EVA Air"
+                                        class="text-xs bg-white border border-stone-200 rounded-lg px-2 py-1.5 focus:ring-2 focus:ring-primary-100">
+                                    <input v-model="seg.flightNumber" placeholder="航班號 BR8"
+                                        class="text-xs bg-white border border-stone-200 rounded-lg px-2 py-1.5 uppercase focus:ring-2 focus:ring-primary-100">
+                                </div>
+                                <div class="grid grid-cols-2 gap-2">
+                                    <input v-model="seg.departureAirport" placeholder="出發機場 TPE"
+                                        class="text-xs bg-white border border-stone-200 rounded-lg px-2 py-1.5 uppercase focus:ring-2 focus:ring-primary-100">
+                                    <input v-model="seg.arrivalAirport" placeholder="抵達機場 SFO"
+                                        class="text-xs bg-white border border-stone-200 rounded-lg px-2 py-1.5 uppercase focus:ring-2 focus:ring-primary-100">
+                                </div>
+                                <div class="grid grid-cols-2 gap-2">
+                                    <div>
+                                        <label class="text-[9px] text-stone-400 font-bold block mb-0.5">出發日期</label>
+                                        <input v-model="seg.departureDate" type="date"
+                                            class="w-full text-xs bg-white border border-stone-200 rounded-lg px-2 py-1.5 focus:ring-2 focus:ring-primary-100">
+                                    </div>
+                                    <div>
+                                        <label class="text-[9px] text-stone-400 font-bold block mb-0.5">出發時間</label>
+                                        <input v-model="seg.departureTime" type="time"
+                                            class="w-full text-xs bg-white border border-stone-200 rounded-lg px-2 py-1.5 focus:ring-2 focus:ring-primary-100">
+                                    </div>
+                                </div>
+                                <div class="grid grid-cols-2 gap-2">
+                                    <div>
+                                        <label class="text-[9px] text-stone-400 font-bold block mb-0.5">抵達日期</label>
+                                        <input v-model="seg.arrivalDate" type="date"
+                                            class="w-full text-xs bg-white border border-stone-200 rounded-lg px-2 py-1.5 focus:ring-2 focus:ring-primary-100">
+                                    </div>
+                                    <div>
+                                        <label class="text-[9px] text-stone-400 font-bold block mb-0.5">抵達時間</label>
+                                        <input v-model="seg.arrivalTime" type="time"
+                                            class="w-full text-xs bg-white border border-stone-200 rounded-lg px-2 py-1.5 focus:ring-2 focus:ring-primary-100">
+                                    </div>
+                                </div>
+                                <div class="grid grid-cols-2 gap-2">
+                                    <input v-model="seg.departureTerminal" placeholder="出發航廈（可選）"
+                                        class="text-xs bg-white border border-stone-200 rounded-lg px-2 py-1.5 focus:ring-2 focus:ring-primary-100">
+                                    <input v-model="seg.arrivalTerminal" placeholder="抵達航廈（可選）"
+                                        class="text-xs bg-white border border-stone-200 rounded-lg px-2 py-1.5 focus:ring-2 focus:ring-primary-100">
+                                </div>
+                                <textarea v-model="seg.segmentNotes" rows="2" placeholder="這一段的備註（可選）"
+                                    class="w-full text-xs bg-white border border-stone-200 rounded-lg px-2 py-1.5 resize-none focus:ring-2 focus:ring-primary-100"></textarea>
+                            </div>
 
-                        <div class="grid grid-cols-2 gap-2">
-                            <select v-model="bookingModal.draft.bookedBy"
-                                class="text-sm bg-stone-50 border border-stone-200 rounded-xl px-3 py-2.5 focus:ring-2 focus:ring-primary-100">
-                                <option value="">誰訂的（可選）</option>
-                                <option v-for="p in participants" :value="p">{{ p }}</option>
-                            </select>
-                            <input v-model="bookingModal.draft.cost" placeholder="費用（可選）"
-                                class="text-sm bg-stone-50 border border-stone-200 rounded-xl px-3 py-2.5 focus:ring-2 focus:ring-primary-100">
-                        </div>
+                            <button @click="addFlightSegment(bookingModal.draft, createBookingFlightSegment)"
+                                class="w-full py-2.5 border-2 border-dashed border-primary-200 rounded-xl text-primary-500 text-xs font-bold hover:bg-primary-50 transition flex items-center justify-center gap-1">
+                                <i class="ph-bold ph-plus"></i> 新增航段
+                            </button>
+                        </template>
 
-                        <div>
-                            <label class="text-[10px] font-bold text-stone-600 uppercase mb-1 block">確認碼 / 票券號碼</label>
-                            <input v-model="bookingModal.draft.confirmationNumber" placeholder="Confirmation Number"
-                                class="w-full text-sm bg-stone-50 border border-stone-200 rounded-xl px-3 py-2.5 font-mono focus:ring-2 focus:ring-primary-100">
-                            <p class="text-[10px] text-stone-400 mt-1">瀏覽時會預設遮蔽（••••••），要按「顯示」才會展開，不會直接出現在行程摘要上。</p>
-                        </div>
+                        <!-- 餐廳訂位／票券／其他：通用欄位 -->
+                        <template v-else>
+                            <input v-model="bookingModal.draft.title"
+                                class="js-booking-title w-full font-bold text-lg text-stone-800 bg-stone-50 rounded-xl px-3 py-2.5 border-none focus:ring-2 focus:ring-primary-200 placeholder:text-stone-300"
+                                placeholder="名稱（餐廳/票券名稱）">
+                            <div class="grid grid-cols-2 gap-2">
+                                <input v-model="bookingModal.draft.date" type="date"
+                                    class="text-sm bg-stone-50 border border-stone-200 rounded-xl px-3 py-2.5 focus:ring-2 focus:ring-primary-100">
+                                <input v-model="bookingModal.draft.time" type="time"
+                                    class="text-sm bg-stone-50 border border-stone-200 rounded-xl px-3 py-2.5 focus:ring-2 focus:ring-primary-100">
+                            </div>
+                            <div class="flex items-center gap-2 bg-stone-50 rounded-xl px-3 py-2 border border-stone-100 focus-within:border-primary-200 focus-within:bg-white transition-colors">
+                                <i class="ph-bold ph-map-pin text-stone-500 shrink-0"></i>
+                                <input v-model="bookingModal.draft.location"
+                                    class="flex-1 min-w-0 text-sm font-medium bg-transparent focus:outline-none text-stone-700"
+                                    placeholder="地點（可選）">
+                            </div>
+                            <div class="grid grid-cols-2 gap-2">
+                                <select v-model="bookingModal.draft.bookedBy"
+                                    class="text-sm bg-stone-50 border border-stone-200 rounded-xl px-3 py-2.5 focus:ring-2 focus:ring-primary-100">
+                                    <option value="">誰訂的（可選）</option>
+                                    <option v-for="p in participants" :value="p">{{ p }}</option>
+                                </select>
+                                <input v-model="bookingModal.draft.cost" placeholder="費用（可選）"
+                                    class="text-sm bg-stone-50 border border-stone-200 rounded-xl px-3 py-2.5 focus:ring-2 focus:ring-primary-100">
+                            </div>
+                            <div>
+                                <label class="text-[10px] font-bold text-stone-600 uppercase mb-1 block">確認碼 / 票券號碼</label>
+                                <input v-model="bookingModal.draft.confirmationNumber" placeholder="Confirmation Number"
+                                    class="w-full text-sm bg-stone-50 border border-stone-200 rounded-xl px-3 py-2.5 font-mono focus:ring-2 focus:ring-primary-100">
+                                <p class="text-[10px] text-stone-400 mt-1">瀏覽時會預設遮蔽（••••••），要按「顯示」才會展開，不會直接出現在行程摘要上。</p>
+                            </div>
+                        </template>
 
                         <textarea v-model="bookingModal.draft.notes" rows="2"
                             class="w-full text-sm text-stone-500 bg-stone-50 rounded-xl px-3 py-2.5 border-none focus:ring-2 focus:ring-primary-100 placeholder:text-stone-300 resize-none leading-relaxed"
@@ -1867,6 +2253,159 @@
                             <button @click="saveBookingModal"
                                 class="bg-primary-600 text-white px-6 py-2.5 rounded-xl font-bold shadow-md shadow-primary-200 hover:bg-primary-700 transition active:scale-95 flex items-center gap-2">
                                 <i class="ph-bold ph-check"></i> {{ bookingModal.mode === 'edit' ? '儲存' : '新增' }}
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </transition>
+
+        <!-- ===== ASA 議程編輯彈窗 ===== -->
+        <transition name="sheet">
+            <div v-if="sessionModal.show" class="sheet-host absolute inset-x-0 top-0 z-[70] flex items-end justify-center">
+                <div class="absolute inset-0 bg-stone-900/40 backdrop-blur-sm" @click="sessionModal.show = false"></div>
+                <div class="sheet-panel relative z-10 w-full bg-white rounded-t-[2rem] shadow-2xl max-h-[85%] overflow-y-auto hide-scroll"
+                    style="padding-bottom: calc(1.25rem + env(safe-area-inset-bottom))">
+                    <div class="sticky top-0 bg-white/95 backdrop-blur-sm px-5 pt-4 pb-3 border-b border-stone-100 z-10">
+                        <div class="w-10 h-1 bg-stone-200 rounded-full mx-auto mb-3"></div>
+                        <div class="flex items-center justify-between">
+                            <h3 class="text-lg font-black text-stone-800">{{ sessionModal.mode === 'edit' ? '編輯議程' : '新增議程' }}</h3>
+                            <button @click="sessionModal.show = false" aria-label="取消並關閉"
+                                class="w-9 h-9 rounded-full bg-stone-100 text-stone-500 flex items-center justify-center hover:bg-stone-200 transition">
+                                <i class="ph-bold ph-x"></i>
+                            </button>
+                        </div>
+                    </div>
+
+                    <div v-if="sessionModal.draft" class="p-5 space-y-4">
+                        <input v-model="sessionModal.draft.title"
+                            class="js-session-title w-full font-bold text-lg text-stone-800 bg-stone-50 rounded-xl px-3 py-2.5 border-none focus:ring-2 focus:ring-primary-200 placeholder:text-stone-300"
+                            placeholder="Session 標題">
+
+                        <div class="grid grid-cols-3 gap-2">
+                            <input v-model="sessionModal.draft.date" type="date"
+                                class="col-span-1 text-sm bg-stone-50 border border-stone-200 rounded-xl px-2 py-2.5 focus:ring-2 focus:ring-primary-100">
+                            <input v-model="sessionModal.draft.startTime" type="time"
+                                class="text-sm bg-stone-50 border border-stone-200 rounded-xl px-2 py-2.5 focus:ring-2 focus:ring-primary-100">
+                            <input v-model="sessionModal.draft.endTime" type="time"
+                                class="text-sm bg-stone-50 border border-stone-200 rounded-xl px-2 py-2.5 focus:ring-2 focus:ring-primary-100">
+                        </div>
+
+                        <div class="grid grid-cols-2 gap-2">
+                            <input v-model="sessionModal.draft.location" placeholder="場地（可選）"
+                                class="text-sm bg-stone-50 border border-stone-200 rounded-xl px-3 py-2.5 focus:ring-2 focus:ring-primary-100">
+                            <input v-model="sessionModal.draft.room" placeholder="房間（可選）"
+                                class="text-sm bg-stone-50 border border-stone-200 rounded-xl px-3 py-2.5 focus:ring-2 focus:ring-primary-100">
+                        </div>
+
+                        <div class="grid grid-cols-2 gap-2">
+                            <select v-model="sessionModal.draft.sessionType"
+                                class="text-sm bg-stone-50 border border-stone-200 rounded-xl px-3 py-2.5 focus:ring-2 focus:ring-primary-100">
+                                <option value="">類型（可選）</option>
+                                <option v-for="t in SESSION_TYPES" :key="t.value" :value="t.value">{{ t.label }}</option>
+                            </select>
+                            <select v-model="sessionModal.draft.topicCategory"
+                                class="text-sm bg-stone-50 border border-stone-200 rounded-xl px-3 py-2.5 focus:ring-2 focus:ring-primary-100">
+                                <option value="">主題分類（可選）</option>
+                                <option v-for="c in TOPIC_CATEGORIES" :key="c.value" :value="c.value">{{ c.label }}</option>
+                            </select>
+                        </div>
+
+                        <input v-model="sessionModal.draft.speakers" placeholder="講者（可選，逗號分隔）"
+                            class="w-full text-sm bg-stone-50 border border-stone-200 rounded-xl px-3 py-2.5 focus:ring-2 focus:ring-primary-100">
+
+                        <textarea v-model="sessionModal.draft.description" rows="2" placeholder="簡介（可選）"
+                            class="w-full text-sm text-stone-600 bg-stone-50 rounded-xl px-3 py-2.5 border-none focus:ring-2 focus:ring-primary-100 resize-none leading-relaxed"></textarea>
+
+                        <div class="grid grid-cols-2 gap-2">
+                            <input v-model="sessionModal.draft.sourceUrl" placeholder="來源連結（可選）"
+                                class="text-sm bg-stone-50 border border-stone-200 rounded-xl px-3 py-2.5 focus:ring-2 focus:ring-primary-100">
+                            <input v-model="sessionModal.draft.sessionId" placeholder="Session ID（可選）"
+                                class="text-sm bg-stone-50 border border-stone-200 rounded-xl px-3 py-2.5 font-mono focus:ring-2 focus:ring-primary-100">
+                        </div>
+
+                        <div>
+                            <label class="text-[10px] font-bold text-stone-600 uppercase mb-1 block">我的標記</label>
+                            <div class="flex h-11 bg-stone-50 p-1 rounded-xl border border-stone-200 items-stretch">
+                                <button v-for="(meta, key) in SESSION_PRIORITY_META" :key="key"
+                                    @click="sessionModal.draft.priority = sessionModal.draft.priority === key ? '' : key"
+                                    class="flex-1 rounded-lg flex items-center justify-center text-xs font-bold transition-colors"
+                                    :class="sessionModal.draft.priority === key ? 'bg-white shadow-sm text-stone-700' : 'opacity-40 text-stone-500 hover:opacity-100'">
+                                    {{ meta.label }}</button>
+                            </div>
+                        </div>
+
+                        <div>
+                            <label class="text-[10px] font-bold text-stone-600 uppercase mb-1 block">出席狀態</label>
+                            <div class="flex h-11 bg-stone-50 p-1 rounded-xl border border-stone-200 items-stretch">
+                                <button v-for="st in ['planned', 'attended', 'skipped']" :key="st"
+                                    @click="sessionModal.draft.status = st"
+                                    class="flex-1 rounded-lg flex items-center justify-center text-xs font-bold transition-colors"
+                                    :class="sessionModal.draft.status === st ? 'bg-white shadow-sm text-stone-700' : 'opacity-40 text-stone-500 hover:opacity-100'">
+                                    {{ st === 'planned' ? '計畫中' : (st === 'attended' ? '已參加' : '已跳過') }}</button>
+                            </div>
+                        </div>
+
+                        <textarea v-model="sessionModal.draft.notes" rows="2" placeholder="我的筆記/備註（可選）"
+                            class="w-full text-sm text-stone-500 bg-stone-50 rounded-xl px-3 py-2.5 border-none focus:ring-2 focus:ring-primary-100 placeholder:text-stone-300 resize-none leading-relaxed"></textarea>
+
+                        <div class="flex items-center justify-between pt-2 border-t border-stone-50">
+                            <button v-if="sessionModal.mode === 'edit'" @click="deleteSessionFromModal"
+                                class="text-red-400 hover:text-red-500 hover:bg-red-50 px-3 py-2 rounded-lg text-xs font-bold transition flex items-center gap-1">
+                                <i class="ph-bold ph-trash"></i> 刪除
+                            </button>
+                            <span v-else></span>
+                            <button @click="saveSessionModal"
+                                class="bg-primary-600 text-white px-6 py-2.5 rounded-xl font-bold shadow-md shadow-primary-200 hover:bg-primary-700 transition active:scale-95 flex items-center gap-2">
+                                <i class="ph-bold ph-check"></i> {{ sessionModal.mode === 'edit' ? '儲存' : '新增' }}
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </transition>
+
+        <!-- ===== 場地索引編輯彈窗 ===== -->
+        <transition name="sheet">
+            <div v-if="venueModal.show" class="sheet-host absolute inset-x-0 top-0 z-[70] flex items-end justify-center">
+                <div class="absolute inset-0 bg-stone-900/40 backdrop-blur-sm" @click="venueModal.show = false"></div>
+                <div class="sheet-panel relative z-10 w-full bg-white rounded-t-[2rem] shadow-2xl max-h-[85%] overflow-y-auto hide-scroll"
+                    style="padding-bottom: calc(1.25rem + env(safe-area-inset-bottom))">
+                    <div class="sticky top-0 bg-white/95 backdrop-blur-sm px-5 pt-4 pb-3 border-b border-stone-100 z-10">
+                        <div class="w-10 h-1 bg-stone-200 rounded-full mx-auto mb-3"></div>
+                        <div class="flex items-center justify-between">
+                            <h3 class="text-lg font-black text-stone-800">{{ venueModal.mode === 'edit' ? '編輯場地' : '新增場地' }}</h3>
+                            <button @click="venueModal.show = false" aria-label="取消並關閉"
+                                class="w-9 h-9 rounded-full bg-stone-100 text-stone-500 flex items-center justify-center hover:bg-stone-200 transition">
+                                <i class="ph-bold ph-x"></i>
+                            </button>
+                        </div>
+                    </div>
+
+                    <div v-if="venueModal.draft" class="p-5 space-y-4">
+                        <input v-model="venueModal.draft.roomName"
+                            class="js-venue-name w-full font-bold text-lg text-stone-800 bg-stone-50 rounded-xl px-3 py-2.5 border-none focus:ring-2 focus:ring-primary-200 placeholder:text-stone-300"
+                            placeholder="場地/房間名稱">
+                        <div class="grid grid-cols-2 gap-2">
+                            <input v-model="venueModal.draft.level" placeholder="樓層（可選）"
+                                class="text-sm bg-stone-50 border border-stone-200 rounded-xl px-3 py-2.5 focus:ring-2 focus:ring-primary-100">
+                            <input v-model="venueModal.draft.area" placeholder="區域（可選）"
+                                class="text-sm bg-stone-50 border border-stone-200 rounded-xl px-3 py-2.5 focus:ring-2 focus:ring-primary-100">
+                        </div>
+                        <input v-model="venueModal.draft.mapLink" placeholder="會場地圖連結（可選）"
+                            class="w-full text-sm bg-stone-50 border border-stone-200 rounded-xl px-3 py-2.5 focus:ring-2 focus:ring-primary-100">
+                        <textarea v-model="venueModal.draft.notes" rows="2" placeholder="導航備註（可選）"
+                            class="w-full text-sm text-stone-500 bg-stone-50 rounded-xl px-3 py-2.5 border-none focus:ring-2 focus:ring-primary-100 placeholder:text-stone-300 resize-none leading-relaxed"></textarea>
+
+                        <div class="flex items-center justify-between pt-2 border-t border-stone-50">
+                            <button v-if="venueModal.mode === 'edit'" @click="deleteVenueFromModal"
+                                class="text-red-400 hover:text-red-500 hover:bg-red-50 px-3 py-2 rounded-lg text-xs font-bold transition flex items-center gap-1">
+                                <i class="ph-bold ph-trash"></i> 刪除
+                            </button>
+                            <span v-else></span>
+                            <button @click="saveVenueModal"
+                                class="bg-primary-600 text-white px-6 py-2.5 rounded-xl font-bold shadow-md shadow-primary-200 hover:bg-primary-700 transition active:scale-95 flex items-center gap-2">
+                                <i class="ph-bold ph-check"></i> {{ venueModal.mode === 'edit' ? '儲存' : '新增' }}
                             </button>
                         </div>
                     </div>
