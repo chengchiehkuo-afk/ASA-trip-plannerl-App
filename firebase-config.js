@@ -7,7 +7,6 @@
 // 詳細步驟請見 README.md「自行架設教學」
 // ============================================================
 export const firebaseConfig = {
-    export const firebaseConfig = {
   apiKey: "AIzaSyDAJ-bXz9vimf723TuzGeO8po_zqqBhaAY",
   authDomain: "asa-trip-planner.firebaseapp.com",
   projectId: "asa-trip-planner",
