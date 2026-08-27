@@ -63,7 +63,7 @@ createApp({
         const isRateLoading = ref(false);
         const weather = ref({ temp: null, icon: 'ph-sun', code: 0, location: '', daily: [] });
         const isWeatherEditing = ref(false);
-        const setup = ref({ destination: '', startDate: new Date().toISOString().split('T')[0], days: 5, rate: 1, currency: 'TWD', langCode: 'zh-TW', langName: '中文', mapProvider: 'google' });
+        const setup = ref({ destination: '', startDate: '2026-10-14', days: 8, rate: 1, currency: 'USD', langCode: 'en', langName: '英文', mapProvider: 'google' });
 
         const currentDay = computed(() => days.value[currentDayIdx.value] || { items: [], flight: null, date: '', title: '' });
         const totalExpense = computed(() => expenses.value.reduce((sum, item) => sum + item.amount, 0));
@@ -441,7 +441,7 @@ createApp({
             isEditing.value = false;
             showSetupModal.value = true;
             showTripMenu.value = false;
-            setup.value = { destination: '', startDate: new Date().toISOString().split('T')[0], days: 5, rate: 1, currency: 'TWD', langCode: 'zh-TW', langName: '中文', mapProvider: 'google' };
+            setup.value = { destination: '', startDate: '2026-10-14', days: 8, rate: 1, currency: 'USD', langCode: 'en', langName: '英文', mapProvider: 'google' };
             weather.value.location = '';
             participantsStr.value = '';
             participants.value = [];
@@ -635,7 +635,7 @@ createApp({
             const url = new URL(window.location.href);
             url.searchParams.set('tripId', currentTripId.value);
             const shareData = {
-                title: `WeTravel: ${setup.value.destination}`,
+                title: `ASA San Diego Trip Planner: ${setup.value.destination}`,
                 text: `一起來規劃 ${setup.value.destination} 的行程吧！`,
                 url: url.toString()
             };
@@ -719,7 +719,7 @@ createApp({
                     }
 
                     // Prevent setup leakage from previous trip
-                    const defaultSetup = { destination: '', startDate: new Date().toISOString().split('T')[0], days: 5, rate: 1, currency: 'TWD', langCode: 'zh-TW', langName: '中文', mapProvider: 'google' };
+                    const defaultSetup = { destination: '', startDate: '2026-10-14', days: 8, rate: 1, currency: 'USD', langCode: 'en', langName: '英文', mapProvider: 'google' };
                     setup.value = data.setup || defaultSetup;
 
                     if (data.rate) exchangeRate.value = data.rate;
