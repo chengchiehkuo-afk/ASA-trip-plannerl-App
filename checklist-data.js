@@ -16,6 +16,8 @@ export const LUGGAGE_META = {
     carry: { label: '隨身', cls: 'bg-green-50 text-green-600 border-green-100' },
     any: { label: '不限', cls: 'bg-stone-100 text-stone-500 border-stone-200' },
     checked: { label: '託運', cls: 'bg-red-50 text-red-500 border-red-100' },
+    // 給「購物清單」這類待辦提醒用——項目本身不用打包、沒有行李位置可選
+    na: { label: '不適用', cls: 'bg-purple-50 text-purple-500 border-purple-100' },
 };
 
 // [category, name, luggage, note]

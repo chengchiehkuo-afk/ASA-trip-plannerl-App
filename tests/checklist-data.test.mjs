@@ -4,7 +4,7 @@ import { CHECKLIST_CATEGORIES, LUGGAGE_META, CHECKLIST_TEMPLATE } from '../check
 const slugs = CHECKLIST_CATEGORIES.map(c => c.slug);
 assert.equal(CHECKLIST_CATEGORIES.length, 8, '分類必須 8 類');
 assert.deepEqual(slugs, ['docs', 'tech', 'meds', 'toiletry', 'makeup', 'clothes', 'flight', 'misc'], '分類順序照 spec');
-assert.deepEqual(Object.keys(LUGGAGE_META), ['carry', 'any', 'checked'], '行李位置三態');
+assert.deepEqual(Object.keys(LUGGAGE_META), ['carry', 'any', 'checked', 'na'], '行李位置三態 + 不適用（給不涉及行李的待辦項目用）');
 
 assert.equal(CHECKLIST_TEMPLATE.length, 75, '模板必須 75 項');
 const byCat = {};

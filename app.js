@@ -39,7 +39,8 @@ const app = createApp({
             'permission-denied': '存取被拒絕，請確認您有權限。',
             'not-found': '找不到此行程，可能已被刪除。',
             'resource-exhausted': '配額已滿，請稍後再試。',
-            'not-configured': '尚未設定 Firebase：請編輯 firebase-config.js，填入你自己的 Firebase 專案設定（步驟見 README）。'
+            'not-configured': '尚未設定 Firebase：請編輯 firebase-config.js，填入你自己的 Firebase 專案設定（步驟見 README）。',
+            'auth-failed': '匿名登入失敗，請確認 Firebase Console → Authentication → Sign-in method 已啟用「匿名」。'
         };
 
         const dbErrorMessage = computed(() => errorMap[dbErrorCode.value] || `發生未知錯誤 (${dbErrorCode.value})`);
@@ -3159,9 +3160,14 @@ const app = createApp({
         const initAuth = async () => {
             try {
                 await signInAnonymously(auth);
-            } catch (e) { console.error("Auth failed", e); }
-            finally {
                 isLoggedIn.value = true;
+            } catch (e) {
+                // 匿名登入失敗（例如 Console 沒開匿名登入、或瀏覽器擋第三方儲存）：不能照舊把
+                // isLoggedIn 設成 true——那會讓畫面看起來像登入成功，之後 Firestore 操作被規則
+                // 擋下時只會顯示語意不明的「權限不足」，看不出真正原因其實是根本沒登入。
+                console.error("Auth failed", e);
+                dbError.value = true;
+                dbErrorCode.value = 'auth-failed';
             }
         };
 
