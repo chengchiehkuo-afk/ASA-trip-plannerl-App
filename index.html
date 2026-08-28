@@ -1402,6 +1402,26 @@
                             <div v-if="!settlementByCurrency.some(g => g.transfers.length)" class="text-xs text-stone-400 pl-1">目前帳務已結清，沒有人需要轉帳。</div>
                             <!-- 需求 F/G：多幣別 settlement 分開顯示之外，額外提供一個約合台幣的參考總額（僅供參考，不是轉帳依據） -->
                             <div class="text-[11px] text-stone-400 pl-1">合計約合台幣 NT${{ fmtMoney(twdSummary.total) }}</div>
+
+                            <!-- 5. 全部改用台幣支付（合併結算）：把上面分幣別各自結算的 USD 結算／TWD 結算合併成一筆，
+                                 方便只需要轉帳一次；不影響、也不取代上面分幣別各自結算的內容，純粹多這一欄。 -->
+                            <div v-if="combinedSettlementHasForeignCurrency" class="pt-2 mt-1 border-t border-stone-200 space-y-2">
+                                <div class="text-[10px] text-stone-400 font-bold pl-1 uppercase tracking-wider">全部改用台幣支付（合併結算）</div>
+                                <div class="flex items-center gap-2 text-xs text-stone-500 pl-1">
+                                    <span>1 {{ setup.currency }} ≈ NT$</span>
+                                    <input v-model="combinedRateInput" type="number" step="0.001" :placeholder="combinedRatePlaceholder"
+                                        class="w-24 bg-stone-50 border border-stone-200 rounded-lg px-2 py-1 text-sm font-mono text-stone-700 focus:outline-none focus:ring-2 focus:ring-primary-100">
+                                    <span class="text-stone-300">（可手動調整，只影響這筆合併結算）</span>
+                                </div>
+                                <div v-if="combinedSettlementMissingRate" class="text-xs text-amber-600 font-bold pl-1">請輸入匯率才能算出合併後的台幣結算</div>
+                                <template v-else>
+                                    <div v-for="(t, i) in combinedSettlementTransfers" :key="'combined-' + i"
+                                        class="text-sm font-bold text-primary-700 bg-primary-50 border border-primary-100 rounded-xl px-3 py-2 flex items-center gap-1.5">
+                                        <i class="ph-bold ph-arrow-right"></i> {{ t.from }} 需付給 {{ t.to }} NT${{ fmtMoney(t.amount) }}
+                                    </div>
+                                    <div v-if="!combinedSettlementTransfers.length" class="text-xs text-stone-400 pl-1">合併後帳務已結清，沒有人需要轉帳。</div>
+                                </template>
+                            </div>
                         </div>
                         <div v-else-if="showOverallSettlement" class="px-4 pb-4 text-xs text-stone-400 border-t border-stone-100 pt-3">目前還沒有任何支出</div>
                     </div>
@@ -3231,7 +3251,7 @@ AS740｜SFO 10:40 → SAN 12:23
         })();
     </script>
 
-    <script type="module" src="./app.js?v=40"></script>
+    <script type="module" src="./app.js?v=41"></script>
 
     <script>
         setTimeout(() => {

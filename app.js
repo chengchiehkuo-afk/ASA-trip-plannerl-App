@@ -626,6 +626,45 @@ const app = createApp({
                 return null;
             }
         });
+        // ---- 全部改用台幣支付（合併結算）：把「全體結算」裡本來分幣別各自顯示的 USD 結算／TWD 結算
+        // 兩筆帳，另外再合併算成一筆台幣總結算，方便使用者實際只需要轉帳一次——不影響、也不取代上面
+        // 分幣別各自結算的 settlementByCurrency／transfers，純粹是多一個「懶人版」欄位。
+        // 匯率預設沿用「約合 {{ base }}」用的同一個 secondaryReferenceRate（某筆 base currency 支出當下
+        // 鎖定的匯率），但額外開放手動輸入覆寫——這裡刻意是「這一個合併結算專用」的匯率，跟每筆 expense
+        // 自己鎖定的 exchangeRateToTWD 是兩回事，改這裡不會回頭動到任何一筆支出的記帳資料或約合台幣總額。
+        const combinedRateInput = ref('');
+        const combinedSettlementRate = computed(() => {
+            const manual = Number(combinedRateInput.value);
+            if (manual > 0) return manual;
+            return secondaryReferenceRate.value || (setup.value.currency === 'TWD' ? 1 : null);
+        });
+        const combinedSettlementHasForeignCurrency = computed(() => (settlementByCurrency.value || []).some(g => g.currency !== 'TWD'));
+        const combinedSettlementMissingRate = computed(() => combinedSettlementHasForeignCurrency.value && !(combinedSettlementRate.value > 0));
+        const combinedSettlementNetTWD = computed(() => {
+            try {
+                const rate = combinedSettlementRate.value;
+                const memberIds = safeMembers.value.map(m => m.id);
+                const net = {}; memberIds.forEach(id => { net[id] = 0; });
+                (settlementByCurrency.value || []).forEach(g => {
+                    const r = g.currency === 'TWD' ? 1 : rate;
+                    if (!(r > 0)) return; // 缺匯率的幣別跳過，不能悄悄當 1 算
+                    memberIds.forEach(id => { net[id] = (net[id] || 0) + (g.net[id] || 0) * r; });
+                });
+                return net;
+            } catch (err) {
+                reportMoneyViewError('combinedSettlementNetTWD', err);
+                return {};
+            }
+        });
+        const combinedSettlementTransfers = computed(() => {
+            try {
+                return computeGreedyTransfers(combinedSettlementNetTWD.value, memberNameById);
+            } catch (err) {
+                reportMoneyViewError('combinedSettlementTransfers', err);
+                return [];
+            }
+        });
+        const combinedRatePlaceholder = computed(() => secondaryReferenceRate.value > 0 ? String(Math.round(secondaryReferenceRate.value * 1000) / 1000) : '請輸入匯率');
         // 某人「個人開銷」小計，依原始幣別分開（需求 B「個人開銷：USD 160」），跟上面的 paid/share 完全分開算，
         // 只有本人自己看得到（見下方 myPersonalExpensesList 的可見性判斷）。
         const memberPersonalTotalsByCurrency = (memberId) => {
@@ -3107,6 +3146,8 @@ const app = createApp({
             expenses, visibleExpenses, newExpense, totalExpense, addExpense, expenseAmountTWD,
             usedCurrencies, settlementByCurrency, secondaryReferenceTotal, secondaryReferenceRate, exchangeRate,
             sharedOnlySettlementByCurrency, sharedOnlyNetTWD,
+            combinedRateInput, combinedSettlementRate, combinedSettlementHasForeignCurrency, combinedSettlementMissingRate,
+            combinedSettlementTransfers, combinedRatePlaceholder,
             twdSummary, moneyViewError, createEmptyMemberSummary, safeMembers,
             currentMemberId, expenseKind, expenseKindLabel, expenseVisibleToMember, expenseMemberShares,
             sharedExpensesList, myPersonalExpensesList, myReimbursementExpensesList, mySettlementByCurrency,
