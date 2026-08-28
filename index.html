@@ -1928,7 +1928,7 @@
                                     :class="currentTripId === trip.id ? 'text-white/70' : 'text-stone-500'">{{
                                     trip.startDate }} • {{ trip.daysCount }} 天</div>
                             </div>
-                            <button v-if="tripList.length > 1" @click.stop="archiveTrip(trip.id)" aria-label="封存旅程"
+                            <button @click.stop="archiveTrip(trip.id)" aria-label="封存旅程"
                                 class="absolute right-3 top-1/2 -translate-y-1/2 w-8 h-8 flex items-center justify-center rounded-lg text-stone-300 hover:bg-stone-100 hover:text-stone-500 transition opacity-0 group-hover:opacity-100 z-10"><i
                                     class="ph-bold ph-archive-box"></i></button>
                         </div>
