@@ -10,6 +10,7 @@ export const CHECKLIST_CATEGORIES = [
     { slug: 'clothes', label: '衣物鞋帽', emoji: '👕' },
     { slug: 'flight', label: '機上舒適', emoji: '✈️' },
     { slug: 'misc', label: '雜物', emoji: '🧷' },
+    { slug: 'shopping', label: '購物清單', emoji: '🛍️' },
 ];
 
 export const LUGGAGE_META = {
