@@ -845,6 +845,24 @@
                         <p class="text-sm text-stone-500 pl-1">點卡片可編輯・按住 ⠿ 拖曳排序・可各自標記想不想去</p>
                     </div>
 
+                    <!-- 口袋名單地圖：把所有候選景點一次標在同一張地圖上，方便比較哪些離得近，
+                         決定要排在同一天，不用等排進行程才發現隔天要跑很遠。 -->
+                    <div v-if="pocketListMapEmbedUrl" class="rounded-3xl overflow-hidden border border-stone-100 shadow-sm bg-stone-50">
+                        <div class="px-4 py-2.5 flex items-center justify-between border-b border-stone-100 bg-white">
+                            <span class="text-xs font-black text-stone-500 flex items-center gap-1.5">
+                                <i class="ph-bold ph-map-trifold text-primary-500"></i> 口袋名單地圖
+                            </span>
+                            <span v-if="pocketListMapOmittedCount" class="text-[10px] text-stone-400">{{ pocketListMapOmittedCount }} 個地點沒有畫進這張總覽地圖</span>
+                        </div>
+                        <iframe :src="pocketListMapEmbedUrl" class="w-full border-0" style="height: 260px" loading="lazy" referrerpolicy="no-referrer-when-downgrade"></iframe>
+                        <div v-if="pocketListMapHasShortLinks" class="px-4 py-2 text-[11px] text-amber-600 bg-amber-50 border-t border-amber-100">
+                            有連結是 Google 地圖分享縮網址（maps.app.goo.gl），沒辦法自動標在地圖上——請改貼「完整網址」（用瀏覽器打開該連結後，網址列出現的那一長串）。
+                        </div>
+                    </div>
+                    <div v-else-if="pocketListMapHasShortLinks" class="rounded-2xl border border-amber-100 bg-amber-50 px-4 py-3 text-xs text-amber-700 leading-relaxed">
+                        <i class="ph-bold ph-map-trifold mr-1"></i> 這幾筆是 Google 地圖分享縮網址（maps.app.goo.gl），沒辦法自動標在地圖上——請改貼「完整網址」（用瀏覽器打開該連結後，網址列出現的那一長串）才能顯示口袋名單地圖。
+                    </div>
+
                     <!-- 尚未選擇「我是誰」：標記偏好前先選一次身份（跟旅遊清單共用同一個身份）-->
                     <div v-if="!activeChecklistMember && checklistMembers.length > 1"
                         class="bg-white rounded-2xl border border-stone-100 shadow-sm p-4 space-y-2">
@@ -3270,7 +3288,7 @@ AS740｜SFO 10:40 → SAN 12:23
         })();
     </script>
 
-    <script type="module" src="./app.js?v=43"></script>
+    <script type="module" src="./app.js?v=44"></script>
 
     <script>
         setTimeout(() => {

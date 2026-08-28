@@ -2518,6 +2518,42 @@ const app = createApp({
             const withLink = currentDayTimelineItems.value.filter(item => item && (item.link || item.location)).length;
             return Math.max(0, withLink - currentDayMapWaypoints.value.length);
         });
+        // ---- 口袋名單地圖：把整份口袋名單的地點串成一條路線內嵌顯示，方便一次比較所有候選景點彼此的
+        // 地理位置，決定「這幾個離很近，可以排同一天」——跟本日地圖同一套 extractMapWaypoint／output=embed
+        // 技巧。沒有貼連結時退回用地點名稱本身當查詢文字（跟 getExternalMapLink 對純文字地名的處理一樣）。
+        // Google 這種舊版多站路線站數一多會不穩定，這裡上限只取前 10 個，超過的部分不畫進這張總覽地圖，
+        // 想確認個別地點就直接點卡片上自己的「開啟連結」。
+        const POCKET_MAP_MAX_WAYPOINTS = 10;
+        const pocketListMapWaypoints = computed(() => {
+            try {
+                return (savedLocations.value || [])
+                    .map(loc => loc && extractMapWaypoint(loc.link || loc.name))
+                    .filter(Boolean)
+                    .slice(0, POCKET_MAP_MAX_WAYPOINTS);
+            } catch (err) {
+                console.error('pocketListMapWaypoints failed', err);
+                return [];
+            }
+        });
+        const pocketListMapEmbedUrl = computed(() => {
+            const points = pocketListMapWaypoints.value;
+            if (!points.length) return null;
+            if (points.length === 1) return `https://maps.google.com/maps?q=${encodeURIComponent(points[0])}&output=embed`;
+            const [first, ...rest] = points;
+            const daddr = rest.map(p => encodeURIComponent(p)).join('+to:');
+            return `https://maps.google.com/maps?saddr=${encodeURIComponent(first)}&daddr=${daddr}&output=embed`;
+        });
+        const pocketListMapHasShortLinks = computed(() => {
+            return (savedLocations.value || []).some(loc => {
+                const raw = loc && (loc.link || loc.name);
+                return raw && GOOGLE_SHORT_MAP_LINK_RE.test(String(raw).trim()) && !extractMapWaypoint(raw);
+            });
+        });
+        // 有地點文字但沒畫進地圖的數量：解析失敗、或超過站數上限，都算在這裡，不特別區分原因
+        const pocketListMapOmittedCount = computed(() => {
+            const withAny = (savedLocations.value || []).filter(loc => loc && (loc.link || loc.name)).length;
+            return Math.max(0, withAny - pocketListMapWaypoints.value.length);
+        });
         const countryInfoMap = { 'jp': { c: 'JPY', l: 'ja', n: '日文', m: 'google' }, 'kr': { c: 'KRW', l: 'ko', n: '韓文', m: 'naver' }, 'us': { c: 'USD', l: 'en', n: '英文', m: 'google' }, 'cn': { c: 'CNY', l: 'zh-CN', n: '簡中', m: 'amap' }, 'th': { c: 'THB', l: 'th', n: '泰文', m: 'google' }, 'tw': { c: 'TWD', l: 'zh-TW', n: '中文', m: 'google' } };
         const updateRateByCurrency = async () => { const currency = setup.value.currency; if (!currency) return; isRateLoading.value = true; try { if (currency === 'TWD') { setup.value.rate = 1; } else { const rRes = await fetch(`https://api.exchangerate-api.com/v4/latest/${currency}`); const rData = await rRes.json(); if (rData?.rates?.TWD) setup.value.rate = rData.rates.TWD; } } catch (e) { console.error('Fetch rate failed', e); } finally { isRateLoading.value = false; } };
         const detectRate = async () => { if (!setup.value.destination) return; isRateLoading.value = true; try { const geoRes = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(setup.value.destination)}&limit=1&addressdetails=1`); const geoData = await geoRes.json(); if (geoData?.[0]?.address?.country_code) { const code = geoData[0].address.country_code.toLowerCase(); const info = countryInfoMap[code] || { c: 'USD', l: 'en', n: '英文', m: 'google' }; setup.value.currency = info.c; setup.value.langCode = info.l; setup.value.langName = info.n; setup.value.mapProvider = info.m || 'google'; if (!weather.value.location) weather.value.location = setup.value.destination; if (info.c === 'TWD') setup.value.rate = 1; else { const rRes = await fetch(`https://api.exchangerate-api.com/v4/latest/${info.c}`); const rData = await rRes.json(); if (rData?.rates?.TWD) setup.value.rate = rData.rates.TWD; } } } catch (e) { } finally { isRateLoading.value = false; } };
@@ -3196,6 +3232,7 @@ const app = createApp({
             viewMode, currentDayIdx, days, currentDay, currentDayTimelineItems, participants, participantsStr, updateParticipants,
             getExternalMapLink, removeFlight, addDay,
             currentDayMapEmbedUrl, currentDayMapSkippedCount, currentDayMapHasShortLinks,
+            pocketListMapEmbedUrl, pocketListMapHasShortLinks, pocketListMapOmittedCount,
             addFlightSegment, removeFlightSegment, moveFlightSegment, formatFlightTime, isNextDayArrival, formatLayover, layoverLabel,
             revealedFlightConfirmations, toggleFlightConfirmation, maskConfirmation,
             expenses, visibleExpenses, newExpense, totalExpense, addExpense, expenseAmountTWD,
