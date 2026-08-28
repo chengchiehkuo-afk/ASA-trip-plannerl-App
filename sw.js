@@ -1,4 +1,4 @@
-const CACHE_NAME = 'asa-trip-planner-v92';
+const CACHE_NAME = 'asa-trip-planner-v93';
 const ASSETS = [
   './index.html',
   './manifest.json',
@@ -64,11 +64,13 @@ self.addEventListener('activate', event => {
 self.addEventListener('fetch', (event) => {
   const url = event.request.url;
 
-  // 如果請求符合不快取的模式，直接走網路
+  // 如果請求符合不快取的模式，直接走網路——cache:'no-store' 是關鍵：只用預設 fetch() 仍然會被
+  // 瀏覽器自己的 HTTP cache（例如 GitHub Pages 回的 Cache-Control: max-age=600）擋下來，開發者
+  // 每次改完 app.js/checklist-data.js 重新部署，使用者卻要等快取過期才看得到新版，等同白改。
   const shouldSkipCache = NO_CACHE_PATTERNS.some(pattern => url.includes(pattern));
   if (shouldSkipCache) {
     event.respondWith(
-      fetch(event.request).catch(() => caches.match(event.request))
+      fetch(new Request(event.request, { cache: 'no-store' })).catch(() => caches.match(event.request))
     );
     return;
   }
