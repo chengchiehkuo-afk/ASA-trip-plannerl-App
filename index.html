@@ -2703,12 +2703,17 @@ AS740｜SFO 10:40 → SAN 12:23
                         <div>
                             <label class="text-[10px] font-bold text-stone-600 uppercase mb-1 block">分類</label>
                             <div class="grid grid-cols-4 gap-1 bg-stone-50 p-1 rounded-xl border border-stone-200">
-                                <button v-for="cat in CHECKLIST_CATEGORIES" :key="cat.slug"
+                                <button v-for="cat in allChecklistCategories" :key="cat.slug"
                                     @click="checkModal.draft.category = cat.slug"
                                     class="rounded-lg flex flex-col items-center justify-center py-1.5 transition-colors"
                                     :class="checkModal.draft.category === cat.slug ? 'bg-white shadow-sm' : 'opacity-40 hover:opacity-100'">
                                     <span class="text-lg leading-none">{{ cat.emoji }}</span>
                                     <span class="text-[9px] font-bold text-stone-500 mt-0.5">{{ cat.label }}</span>
+                                </button>
+                                <button @click="addChecklistCategory" type="button"
+                                    class="rounded-lg flex flex-col items-center justify-center py-1.5 transition-colors opacity-40 hover:opacity-100 border border-dashed border-stone-300">
+                                    <i class="ph-bold ph-plus text-lg leading-none"></i>
+                                    <span class="text-[9px] font-bold text-stone-500 mt-0.5">新增分類</span>
                                 </button>
                             </div>
                         </div>

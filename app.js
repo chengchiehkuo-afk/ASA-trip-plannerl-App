@@ -58,6 +58,9 @@ const app = createApp({
         // 不再是存在 trip 文件裡的陣列欄位——原因見下方「記帳」區塊開頭的說明
         const expenses = ref([]);
         const checklist = ref([]);
+        // 使用者自己加的分類（例如「購物清單」）——跟內建的 CHECKLIST_CATEGORIES 分開存，
+        // 這樣以後改版更新內建分類清單時不會跟使用者自訂的混在一起、也不會互相覆蓋
+        const customChecklistCategories = ref([]);
         const bookings = ref([]); // 訂位/票券總表：hotel / flight / restaurant / ticket / other，見「口袋名單」下方新增的 bookingModal
         const collapsedCats = reactive({});
         const participants = ref([]);
@@ -1613,14 +1616,25 @@ const app = createApp({
             done: checklist.value.filter(i => i.checkedBy && i.checkedBy[activeChecklistMember.value]).length,
             total: checklist.value.length
         }));
+        // 內建分類 + 這趟旅程自己加的分類，兩者合併給畫面用（新增項目時的分類選單、下面的分類清單）
+        const allChecklistCategories = computed(() => [...CHECKLIST_CATEGORIES, ...customChecklistCategories.value]);
         // 分類進度跟著目前選中角色算（多人並排時代曾是「全員勾完才算」，已廢）
-        const checklistByCategory = computed(() => CHECKLIST_CATEGORIES
+        const checklistByCategory = computed(() => allChecklistCategories.value
             .map(cat => {
                 const items = checklist.value.filter(i => i.category === cat.slug);
                 return { ...cat, items, done: items.filter(i => i.checkedBy && i.checkedBy[activeChecklistMember.value]).length };
             })
             .filter(cat => cat.items.length));
         const toggleCat = (slug) => { collapsedCats[slug] = !collapsedCats[slug]; };
+        const addChecklistCategory = () => {
+            const name = (window.prompt('新增分類名稱：') || '').trim();
+            if (!name) return;
+            if (allChecklistCategories.value.some(c => c.label === name)) {
+                showToast('已經有同名分類了', { icon: 'ph-bold ph-warning' });
+                return;
+            }
+            customChecklistCategories.value.push({ slug: 'cat_' + generateId(), label: name, emoji: '🏷️' });
+        };
 
         // Chrome 偶發 bug：換頁淡入的 CSSTransition 凍結在 currentTime 0（fill backwards 持續蓋 opacity:0 → 整頁空白），
         // 且 Vue 已清完 transition class、殘留動畫不會自己消失。換頁後逾時檢查，卡住就取消殘留動畫自癒。
@@ -2868,6 +2882,7 @@ const app = createApp({
             expenses.value = [];
             savedLocations.value = newTripUseAsaTemplate.value ? [seedAsaSanDiego2026Poster()] : [];
             checklist.value = seedChecklist();
+            customChecklistCategories.value = [];
             bookings.value = newTripUseAsaTemplate.value ? seedAsaSanDiego2026Bookings() : [];
             // ASA 2026 完整議程還沒公開，範本不帶入任何 session/venue（避免假造資料）；只有 My Presentation 有已知資訊可帶
             conferenceSessions.value = [];
@@ -2919,6 +2934,7 @@ const app = createApp({
                 } else {
                     days.value = [];
                     checklist.value = [];
+                    customChecklistCategories.value = [];
                     if (unsubscribeExpenses) { unsubscribeExpenses(); unsubscribeExpenses = null; }
                     expenses.value = [];
                     members.value = [];
@@ -2994,12 +3010,15 @@ const app = createApp({
                     savedLocations.value = (data.locations || []).filter(l => l);
                     savedLocations.value.forEach(l => { if (!l.prefs) l.prefs = {}; });
 
+                    // 自訂分類要先載入，下面驗證 checklist 項目的 category 時才認得使用者自己加的分類
+                    customChecklistCategories.value = (data.customChecklistCategories || []).filter(c => c);
+
                     // 舊旅程無 checklist → 空陣列（分頁顯示帶入模板的空狀態）；欄位缺漏防禦性補齊
                     checklist.value = (data.checklist || []).filter(i => i);
                     checklist.value.forEach(i => {
                         if (!i.id) i.id = generateId();
                         if (!i.checkedBy) i.checkedBy = {};
-                        if (!CHECKLIST_CATEGORIES.some(c => c.slug === i.category)) i.category = 'misc';
+                        if (!allChecklistCategories.value.some(c => c.slug === i.category)) i.category = 'misc';
                         if (!LUGGAGE_META[i.luggage]) i.luggage = 'any';
                     });
 
@@ -3125,6 +3144,7 @@ const app = createApp({
                         members: JSON.parse(JSON.stringify(members.value)),
                         locations: savedLocations.value,
                         checklist: JSON.parse(JSON.stringify(checklist.value)),
+                        customChecklistCategories: JSON.parse(JSON.stringify(customChecklistCategories.value)),
                         bookings: JSON.parse(JSON.stringify(bookings.value)),
                         conferenceSessions: JSON.parse(JSON.stringify(conferenceSessions.value)),
                         conferenceVenues: JSON.parse(JSON.stringify(conferenceVenues.value)),
@@ -3149,7 +3169,7 @@ const app = createApp({
             }, 1000);
         };
 
-        watch([days, members, savedLocations, checklist, bookings, conferenceSessions, conferenceVenues, myPresentation, exchangeRate, participantsStr, setup], () => {
+        watch([days, members, savedLocations, checklist, customChecklistCategories, bookings, conferenceSessions, conferenceVenues, myPresentation, exchangeRate, participantsStr, setup], () => {
             if (!ignoreRemoteUpdate && !(showSetupModal.value && !isEditing.value)) debouncedSave();
         }, { deep: true });
 
@@ -3302,7 +3322,7 @@ const app = createApp({
             activeChecklistMember, chooseChecklistMember,
             myChecklistProgress, checklistByCategory, seedDefaultChecklist, resetChecklist,
             checkModal, openCheckModal, saveCheckModal, deleteCheckFromModal, isCheckNameInvalid,
-            CHECKLIST_CATEGORIES, LUGGAGE_META
+            LUGGAGE_META, allChecklistCategories, addChecklistCategory
         };
     }
 })
