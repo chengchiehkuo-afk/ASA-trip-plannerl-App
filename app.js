@@ -2484,6 +2484,12 @@ const app = createApp({
             if (m) { try { return decodeURIComponent(m[1].replace(/\+/g, ' ')); } catch { return m[1].replace(/\+/g, ' '); } }
             return null;
         };
+        // 縮網址（例如 Google 地圖 App「分享」按鈕產生的 maps.app.goo.gl/xxxx）沒辦法在前端解析：瀏覽器
+        // 看不到跨網域 redirect 的目的地網址（CORS 限制讀不到 Location header），試過的免費展開服務
+        // （allorigins.win）本身不穩定常常打不通，另一個 unshorten.me 雖然能用但匿名額度很低，兩個都不
+        // 適合正式依賴，所以這裡不接任何第三方服務——縮網址一律當「沒辦法自動標在地圖上」處理，跳過但不報錯，
+        // 並在下面 currentDayMapHasShortLinks 標記出來，UI 端會提示使用者改貼展開後的完整網址。
+        const GOOGLE_SHORT_MAP_LINK_RE = /^https?:\/\/(maps\.app\.goo\.gl|goo\.gl\/maps)\//i;
         const currentDayMapWaypoints = computed(() => {
             try {
                 return currentDayTimelineItems.value
@@ -2493,6 +2499,12 @@ const app = createApp({
                 console.error('currentDayMapWaypoints failed', err);
                 return [];
             }
+        });
+        const currentDayMapHasShortLinks = computed(() => {
+            return currentDayTimelineItems.value.some(item => {
+                const raw = item && (item.link || item.location);
+                return raw && GOOGLE_SHORT_MAP_LINK_RE.test(String(raw).trim()) && !extractMapWaypoint(raw);
+            });
         });
         const currentDayMapEmbedUrl = computed(() => {
             const points = currentDayMapWaypoints.value;
@@ -3183,7 +3195,7 @@ const app = createApp({
         return {
             viewMode, currentDayIdx, days, currentDay, currentDayTimelineItems, participants, participantsStr, updateParticipants,
             getExternalMapLink, removeFlight, addDay,
-            currentDayMapEmbedUrl, currentDayMapSkippedCount,
+            currentDayMapEmbedUrl, currentDayMapSkippedCount, currentDayMapHasShortLinks,
             addFlightSegment, removeFlightSegment, moveFlightSegment, formatFlightTime, isNextDayArrival, formatLayover, layoverLabel,
             revealedFlightConfirmations, toggleFlightConfirmation, maskConfirmation,
             expenses, visibleExpenses, newExpense, totalExpense, addExpense, expenseAmountTWD,

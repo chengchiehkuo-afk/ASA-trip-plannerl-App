@@ -697,6 +697,13 @@
                             <span v-if="currentDayMapSkippedCount" class="text-[10px] text-stone-400">{{ currentDayMapSkippedCount }} 個連結無法自動標在地圖上</span>
                         </div>
                         <iframe :src="currentDayMapEmbedUrl" class="w-full border-0" style="height: 260px" loading="lazy" referrerpolicy="no-referrer-when-downgrade"></iframe>
+                        <div v-if="currentDayMapHasShortLinks" class="px-4 py-2 text-[11px] text-amber-600 bg-amber-50 border-t border-amber-100">
+                            有連結是 Google 地圖分享縮網址（maps.app.goo.gl），沒辦法自動標在地圖上——請改貼「完整網址」（用瀏覽器打開該連結後，網址列出現的那一長串）。
+                        </div>
+                    </div>
+                    <!-- 完全沒有任何地點能標在地圖上，但確實貼了縮網址時，單獨顯示原因，不要整塊靜默消失 -->
+                    <div v-else-if="currentDayMapHasShortLinks" class="rounded-2xl border border-amber-100 bg-amber-50 px-4 py-3 text-xs text-amber-700 leading-relaxed">
+                        <i class="ph-bold ph-map-trifold mr-1"></i> 這幾筆是 Google 地圖分享縮網址（maps.app.goo.gl），沒辦法自動標在地圖上——請改貼「完整網址」（用瀏覽器打開該連結後，網址列出現的那一長串）才能顯示本日地圖。
                     </div>
                 </div>
 
@@ -3263,7 +3270,7 @@ AS740｜SFO 10:40 → SAN 12:23
         })();
     </script>
 
-    <script type="module" src="./app.js?v=42"></script>
+    <script type="module" src="./app.js?v=43"></script>
 
     <script>
         setTimeout(() => {
