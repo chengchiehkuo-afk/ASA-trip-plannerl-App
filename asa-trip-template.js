@@ -7,6 +7,9 @@ export const ASA_SD_2026_TRIP_DEFAULTS = {
     startDate: '2026-10-14',
     days: 8,
     currency: 'USD',
+    // 標記這趟旅程是套用 ASA 範本建立的，用來決定要不要顯示「議程」這個 ASA 專屬分頁——
+    // 一般（空白行程）不會有這個欄位，讀回來是 undefined/false，就不會顯示。
+    isAsaTemplate: true,
 };
 
 // [date(YYYY-MM-DD), time(HH:MM), type, activity, note]

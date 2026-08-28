@@ -1408,7 +1408,7 @@
                     </template>
                 </div>
 
-                <div v-else-if="viewMode === 'conference'" key="conference"
+                <div v-else-if="viewMode === 'conference' && isAsaConferenceTrip" key="conference"
                     class="view-pane p-5 pb-32 space-y-4 flex-1 overflow-y-auto hide-scroll">
                     <div class="mb-2">
                         <h2 class="text-2xl font-black text-stone-800 flex items-center gap-2">
@@ -1829,7 +1829,7 @@
                         :class="viewMode === 'money' ? '' : 'opacity-40'"><i class="ph-bold ph-wallet"
                             style="font-size:1.55rem"></i></span><span
                         class="text-[12px] font-bold leading-none">記帳</span></button>
-                <button @click="viewMode = 'conference'"
+                <button v-if="isAsaConferenceTrip" @click="viewMode = 'conference'"
                     class="flex-1 flex flex-col items-center justify-center gap-0.5 py-1.5 rounded-2xl transition-all active:scale-95"
                     :class="viewMode === 'conference' ? 'bg-primary-50 text-primary-600' : 'text-stone-400'">
                     <span class="flex items-center justify-center transition-all" style="width:1.9rem;height:1.9rem"

@@ -112,7 +112,7 @@ const app = createApp({
         const isRateLoading = ref(false);
         const weather = ref({ temp: null, icon: 'ph-sun', code: 0, location: '', daily: [] });
         const isWeatherEditing = ref(false);
-        const setup = ref({ destination: '', startDate: '2026-10-14', days: 8, rate: 1, currency: 'USD', langCode: 'en', langName: '英文', mapProvider: 'google' });
+        const setup = ref({ destination: '', startDate: '2026-10-14', days: 8, rate: 1, currency: 'USD', langCode: 'en', langName: '英文', mapProvider: 'google', isAsaTemplate: false });
         // 快速新增支出表單的幣別預設跟著目前旅程的 base currency 走；只在使用者還沒自己選過（空字串）時才補，
         // 避免每次 setup.currency 變動（例如旅伴同時在編輯設定，或切換旅程）就把使用者已選好的幣別蓋掉。
         // 幣別是「自動」補上的、使用者沒有手動觸發 select 的 @change，所以這裡也要順便自動補匯率快照——
@@ -720,6 +720,11 @@ const app = createApp({
             const codes = Object.keys(CURRENCY_SYMBOLS);
             return setup.value.currency && !codes.includes(setup.value.currency) ? [...codes, setup.value.currency] : codes;
         });
+        // 「議程」分頁是 ASA 研討會專屬功能，一般（空白行程）不需要看到。新建立的旅程靠 setup.isAsaTemplate
+        // 判斷；這面旗標是這次才加的，在此之前就已經套用過 ASA 範本的舊旅程資料裡不會有這個欄位，讀回來是
+        // undefined，所以額外用 destination 字串（範本固定寫死的 'San Diego, ASA 2026'）當退回判斷，
+        // 避免舊資料的使用者突然看不到自己原本就在用的議程分頁。
+        const isAsaConferenceTrip = computed(() => !!(setup.value.isAsaTemplate || setup.value.destination === ASA_SD_2026_TRIP_DEFAULTS.destination));
         const currencyLabel = computed(() => setup.value.currency || '外幣');
         const currencySymbol = computed(() => symbolForCurrency(setup.value.currency));
         // 結算/總覽金額一律用這個格式化，不能整數 Math.round——分帳常常會出現 .5（例如兩人分攤奇數總額），
@@ -1517,10 +1522,14 @@ const app = createApp({
             newTripUseAsaTemplate.value = true;
             Object.assign(setup.value, ASA_SD_2026_TRIP_DEFAULTS);
             if (weather.value) weather.value.location = ASA_SD_2026_TRIP_DEFAULTS.destination;
+            // 範本直接用 Object.assign 設定 currency，不是使用者手動選 <select>，不會觸發它的 @change，
+            // 匯率欄位就會停在建立新旅程時的預設值 1（也就是「1 USD ≈ 1 TWD」這個錯誤畫面）——
+            // 這裡補一次真正的匯率抓取，跟使用者自己手動改幣別是同一條路徑。
+            updateRateByCurrency();
         };
         const useBlankTripTemplate = () => {
             newTripUseAsaTemplate.value = false;
-            setup.value = { destination: '', startDate: '2026-10-14', days: 8, rate: 1, currency: 'USD', langCode: 'en', langName: '英文', mapProvider: 'google' };
+            setup.value = { destination: '', startDate: '2026-10-14', days: 8, rate: 1, currency: 'USD', langCode: 'en', langName: '英文', mapProvider: 'google', isAsaTemplate: false };
             if (weather.value) weather.value.location = '';
         };
 
@@ -2519,7 +2528,7 @@ const app = createApp({
             showSetupModal.value = true;
             showTripMenu.value = false;
             newTripUseAsaTemplate.value = false;
-            setup.value = { destination: '', startDate: '2026-10-14', days: 8, rate: 1, currency: 'USD', langCode: 'en', langName: '英文', mapProvider: 'google' };
+            setup.value = { destination: '', startDate: '2026-10-14', days: 8, rate: 1, currency: 'USD', langCode: 'en', langName: '英文', mapProvider: 'google', isAsaTemplate: false };
             weather.value.location = '';
             participantsStr.value = '';
             participants.value = [];
@@ -2906,7 +2915,7 @@ const app = createApp({
                     }
 
                     // Prevent setup leakage from previous trip
-                    const defaultSetup = { destination: '', startDate: '2026-10-14', days: 8, rate: 1, currency: 'USD', langCode: 'en', langName: '英文', mapProvider: 'google' };
+                    const defaultSetup = { destination: '', startDate: '2026-10-14', days: 8, rate: 1, currency: 'USD', langCode: 'en', langName: '英文', mapProvider: 'google', isAsaTemplate: false };
                     setup.value = data.setup || defaultSetup;
                     // 整份重置支出草稿，不沿用上一趟旅程選的幣別/分攤方式/分攤對象
                     newExpense.value = createExpenseDraft();
@@ -3117,6 +3126,7 @@ const app = createApp({
             updateExchangeRate, localDateStr, fmtExpDate,
             weather, getTimePeriod,
             showSetupModal, setup, initTrip, weatherDisplay, detectRate, isRateLoading, currencyLabel, currencySymbol, toggleFlightCard, getDotColor,
+            isAsaConferenceTrip,
             newTripUseAsaTemplate, useAsaSanDiego2026Template, useBlankTripTemplate,
             showTripMenu, tripList, createNewTrip, switchTrip, archiveTrip, currentTripId,
             allTrips, allTripsStatus, showArchivedTrips, loadAllTrips, otherTrips, archivedTrips, adoptTrip, unarchiveTrip, deleteArchivedTrip,
