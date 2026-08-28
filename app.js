@@ -2464,6 +2464,48 @@ const app = createApp({
         const updateExchangeRate = () => { if (setup.value) setup.value.rate = exchangeRate.value; };
 
         const getExternalMapLink = (loc) => { if (!loc) return '#'; if (isUrl(loc)) return loc; const encodedLoc = encodeURIComponent(loc); if (setup.value.mapProvider === 'naver') return `https://map.naver.com/v5/search/${encodedLoc}`; else if (setup.value.mapProvider === 'amap') return `https://www.amap.com/search?query=${encodedLoc}`; else return `https://www.google.com/maps/search/?api=1&query=${encodedLoc}`; };
+        // ---- 本日地圖：把當天每個行程項目貼的地點/Google 地圖連結，串成一條路線內嵌顯示 -------------------
+        // 不申請 Google Maps API 金鑰，用舊版 maps.google.com 的 saddr/daddr（多站用 +to: 串接）+ output=embed
+        // 網址技巧內嵌，這是 Google 官方 Embed API 之外行之有年、不需要金鑰的作法（沒有官方保證，理論上
+        // Google 未來改版可能讓這個嵌入失效，但目前廣泛可用；一旦失效不影響「開啟連結」等其他既有地圖功能）。
+        // 純地名/地址文字直接拿去查；如果貼的是完整 Google 地圖網址，嘗試從網址常見的
+        // /maps/place/名稱、@緯度,經度、?q=關鍵字 三種格式抓出可讀的地點；縮網址（maps.app.goo.gl）
+        // 前端沒辦法解析，直接跳過這筆，不會讓整條路線網址壞掉、也不會讓其他地點跟著顯示不出來。
+        const extractMapWaypoint = (raw) => {
+            if (!raw) return null;
+            const val = String(raw).trim();
+            if (!val) return null;
+            if (!isUrl(val)) return val;
+            let m = val.match(/\/maps\/place\/([^/@]+)/);
+            if (m) { try { return decodeURIComponent(m[1].replace(/\+/g, ' ')); } catch { return m[1].replace(/\+/g, ' '); } }
+            m = val.match(/@(-?\d+\.\d+),(-?\d+\.\d+)/);
+            if (m) return `${m[1]},${m[2]}`;
+            m = val.match(/[?&]q=([^&]+)/);
+            if (m) { try { return decodeURIComponent(m[1].replace(/\+/g, ' ')); } catch { return m[1].replace(/\+/g, ' '); } }
+            return null;
+        };
+        const currentDayMapWaypoints = computed(() => {
+            try {
+                return currentDayTimelineItems.value
+                    .map(item => item && extractMapWaypoint(item.link || item.location))
+                    .filter(Boolean);
+            } catch (err) {
+                console.error('currentDayMapWaypoints failed', err);
+                return [];
+            }
+        });
+        const currentDayMapEmbedUrl = computed(() => {
+            const points = currentDayMapWaypoints.value;
+            if (!points.length) return null;
+            if (points.length === 1) return `https://maps.google.com/maps?q=${encodeURIComponent(points[0])}&output=embed`;
+            const [first, ...rest] = points;
+            const daddr = rest.map(p => encodeURIComponent(p)).join('+to:');
+            return `https://maps.google.com/maps?saddr=${encodeURIComponent(first)}&daddr=${daddr}&output=embed`;
+        });
+        const currentDayMapSkippedCount = computed(() => {
+            const withLink = currentDayTimelineItems.value.filter(item => item && (item.link || item.location)).length;
+            return Math.max(0, withLink - currentDayMapWaypoints.value.length);
+        });
         const countryInfoMap = { 'jp': { c: 'JPY', l: 'ja', n: '日文', m: 'google' }, 'kr': { c: 'KRW', l: 'ko', n: '韓文', m: 'naver' }, 'us': { c: 'USD', l: 'en', n: '英文', m: 'google' }, 'cn': { c: 'CNY', l: 'zh-CN', n: '簡中', m: 'amap' }, 'th': { c: 'THB', l: 'th', n: '泰文', m: 'google' }, 'tw': { c: 'TWD', l: 'zh-TW', n: '中文', m: 'google' } };
         const updateRateByCurrency = async () => { const currency = setup.value.currency; if (!currency) return; isRateLoading.value = true; try { if (currency === 'TWD') { setup.value.rate = 1; } else { const rRes = await fetch(`https://api.exchangerate-api.com/v4/latest/${currency}`); const rData = await rRes.json(); if (rData?.rates?.TWD) setup.value.rate = rData.rates.TWD; } } catch (e) { console.error('Fetch rate failed', e); } finally { isRateLoading.value = false; } };
         const detectRate = async () => { if (!setup.value.destination) return; isRateLoading.value = true; try { const geoRes = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(setup.value.destination)}&limit=1&addressdetails=1`); const geoData = await geoRes.json(); if (geoData?.[0]?.address?.country_code) { const code = geoData[0].address.country_code.toLowerCase(); const info = countryInfoMap[code] || { c: 'USD', l: 'en', n: '英文', m: 'google' }; setup.value.currency = info.c; setup.value.langCode = info.l; setup.value.langName = info.n; setup.value.mapProvider = info.m || 'google'; if (!weather.value.location) weather.value.location = setup.value.destination; if (info.c === 'TWD') setup.value.rate = 1; else { const rRes = await fetch(`https://api.exchangerate-api.com/v4/latest/${info.c}`); const rData = await rRes.json(); if (rData?.rates?.TWD) setup.value.rate = rData.rates.TWD; } } } catch (e) { } finally { isRateLoading.value = false; } };
@@ -3141,6 +3183,7 @@ const app = createApp({
         return {
             viewMode, currentDayIdx, days, currentDay, currentDayTimelineItems, participants, participantsStr, updateParticipants,
             getExternalMapLink, removeFlight, addDay,
+            currentDayMapEmbedUrl, currentDayMapSkippedCount,
             addFlightSegment, removeFlightSegment, moveFlightSegment, formatFlightTime, isNextDayArrival, formatLayover, layoverLabel,
             revealedFlightConfirmations, toggleFlightConfirmation, maskConfirmation,
             expenses, visibleExpenses, newExpense, totalExpense, addExpense, expenseAmountTWD,

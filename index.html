@@ -686,6 +686,18 @@
 
 
                     </div>
+
+                    <!-- 本日地圖：把當天每個行程項目貼的地點/Google 地圖連結串成一條路線內嵌顯示，方便一眼看出
+                         地點分佈跟彼此距離，不需要 Google Maps API 金鑰（見 app.js 的 currentDayMapEmbedUrl 說明）。 -->
+                    <div v-if="currentDayMapEmbedUrl" class="rounded-3xl overflow-hidden border border-stone-100 shadow-sm bg-stone-50">
+                        <div class="px-4 py-2.5 flex items-center justify-between border-b border-stone-100 bg-white">
+                            <span class="text-xs font-black text-stone-500 flex items-center gap-1.5">
+                                <i class="ph-bold ph-map-trifold text-primary-500"></i> 本日地圖
+                            </span>
+                            <span v-if="currentDayMapSkippedCount" class="text-[10px] text-stone-400">{{ currentDayMapSkippedCount }} 個連結無法自動標在地圖上</span>
+                        </div>
+                        <iframe :src="currentDayMapEmbedUrl" class="w-full border-0" style="height: 260px" loading="lazy" referrerpolicy="no-referrer-when-downgrade"></iframe>
+                    </div>
                 </div>
 
                 <div v-else-if="viewMode === 'bookings'" key="bookings"
@@ -3251,7 +3263,7 @@ AS740｜SFO 10:40 → SAN 12:23
         })();
     </script>
 
-    <script type="module" src="./app.js?v=41"></script>
+    <script type="module" src="./app.js?v=42"></script>
 
     <script>
         setTimeout(() => {
