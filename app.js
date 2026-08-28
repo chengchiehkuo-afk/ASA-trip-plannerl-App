@@ -6,11 +6,11 @@ import { firebaseConfig } from './firebase-config.js';
 
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js";
 import { getAuth, signInAnonymously, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-auth.js";
-import { initializeFirestore, collection, doc, setDoc, onSnapshot, getDocs, runTransaction, deleteField, persistentLocalCache, persistentMultipleTabManager } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js";
+import { initializeFirestore, collection, doc, setDoc, deleteDoc, onSnapshot, getDocs, runTransaction, deleteField, persistentLocalCache, persistentMultipleTabManager } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js";
 import { CHECKLIST_CATEGORIES, LUGGAGE_META, CHECKLIST_TEMPLATE } from './checklist-data.js';
 import { ASA_SD_2026_TRIP_DEFAULTS, ASA_SD_2026_ITINERARY, ASA_SD_2026_POSTER, ASA_SD_2026_FLIGHTS, ASA_SD_2026_BOOKINGS } from './asa-trip-template.js';
 
-createApp({
+const app = createApp({
     setup() {
         console.log('Vue Setup started');
         const viewMode = ref('plan');
@@ -62,7 +62,20 @@ createApp({
         const participants = ref([]);
         const participantsStr = ref('');
         const exchangeRate = ref(0.215);
-        const newExpense = ref({ title: '', amount: '', payerMemberId: '' });
+        // newExpense 的完整形狀（含 category/splitAmongMemberIds/splitMethod/customSplits/notes/匯率快照欄位）
+        // 由下面的 createExpenseDraft() 產生；這裡先給一個陽春版初始值，因為 createExpenseDraft 依賴
+        // setup（trip baseCurrency）——而 setup 在檔案裡宣告在後面，模組初始化當下還不能呼叫它（TDZ）。
+        // currency 留空，交給下面「watch setup.currency」那段在 setup 就緒後自動補上。
+        const newExpense = ref({
+            title: '', category: 'other', amount: '', currency: '',
+            paidByMemberId: '', splitAmongMemberIds: [], splitMethod: 'equal', customSplits: {}, notes: '',
+            // exchangeRateToTWD：1 單位 currency 等於多少 TWD，每筆支出建立當下鎖死的快照（見 applyFetchedRate/buildExpenseRateFields）。
+            // 這裡刻意留 null 而不是預設 1——currency 一旦不是 TWD 就必須實際抓過／填過匯率才能存檔，
+            // 不能讓表單一開始就用一個沒人確認過的 1 通過驗證（需求 H）。
+            exchangeRateToTWD: null, exchangeRateFetchedAt: null, exchangeRateSource: 'same-currency', exchangeRateLocked: true,
+            summaryCurrency: 'TWD',
+            expenseType: 'shared', // UI-only：個人視角表單的「支出類型」快選，不落地存檔（見 setExpenseType 說明）
+        });
 
         // ---- 成員身分登記（memberId）：只給記帳用，跟 checklist/口袋名單既有的「用名字字串當 key」互不影響 ----
         // 每個 participant 名字對應一個穩定、不隨改名/移除而變的 id，寫進 trip 文件的 members 欄位、所有裝置共用。
@@ -70,16 +83,20 @@ createApp({
         // auth.uid——後者是「這台裝置/這次登入」的身分，換裝置或清 storage 就會變，沒辦法拿來跨裝置代表同一個人。
         // 移除 participant 不會刪掉對應的 member 記錄（append-only），這樣舊支出的付款人名字才不會變成查無此人。
         const members = ref([]); // [{ id, name }]
-        const memberIdByName = (name) => members.value.find(m => m.name === name)?.id || null;
-        const memberNameById = (id) => members.value.find(m => m.id === id)?.name || '';
+        // ---- 防呆：members 資料本身若混進 null 或沒有 id 的髒項目（理論上不該發生，但同步/合併資料時
+        // 曾經看過），後面所有 members.value.map(m => m.id) 之類的地方全部會被拖累（輕則多一個 undefined id，
+        // 重則直接整頁 crash）。往後所有結算相關計算一律改讀這個過濾過的版本，不要直接讀 members.value。
+        const safeMembers = computed(() => (Array.isArray(members.value) ? members.value.filter(m => m && m.id) : []));
+        const memberIdByName = (name) => safeMembers.value.find(m => m.name === name)?.id || null;
+        const memberNameById = (id) => safeMembers.value.find(m => m.id === id)?.name || '';
         const ensureMemberRecord = (name) => {
             if (!name) return null;
-            let rec = members.value.find(m => m.name === name);
+            let rec = safeMembers.value.find(m => m.name === name);
             if (!rec) { rec = { id: generateId(), name }; members.value.push(rec); }
             return rec.id;
         };
         // 只給「目前使用中」的成員選（付款人下拉選單用），排除已被移除但仍保留歷史紀錄的舊成員
-        const activeMembers = computed(() => members.value.filter(m => participants.value.includes(m.name)));
+        const activeMembers = computed(() => safeMembers.value.filter(m => participants.value.includes(m.name)));
         // 這台裝置目前的身分沿用 activeChecklistMember（旅遊清單「這是誰」的選擇，全 app 唯一一套裝置身分機制）
         const currentActorMemberId = computed(() => {
             const name = activeChecklistMember.value;
@@ -96,52 +113,367 @@ createApp({
         const weather = ref({ temp: null, icon: 'ph-sun', code: 0, location: '', daily: [] });
         const isWeatherEditing = ref(false);
         const setup = ref({ destination: '', startDate: '2026-10-14', days: 8, rate: 1, currency: 'USD', langCode: 'en', langName: '英文', mapProvider: 'google' });
+        // 快速新增支出表單的幣別預設跟著目前旅程的 base currency 走；只在使用者還沒自己選過（空字串）時才補，
+        // 避免每次 setup.currency 變動（例如旅伴同時在編輯設定，或切換旅程）就把使用者已選好的幣別蓋掉。
+        // 幣別是「自動」補上的、使用者沒有手動觸發 select 的 @change，所以這裡也要順便自動補匯率快照——
+        // 不然一筆 currency 已經是 USD、但 exchangeRateToTWD 還是 null 的支出會被 validateExpenseDraft 擋下來，
+        // 使用者會搞不懂「我明明什麼都填了」為什麼還是不能存。用 nextTick 延後呼叫 applyFetchedRate：
+        // 這行 watch 在 setup() 執行到這裡時就會立刻同步觸發一次（immediate:true），但 applyFetchedRate
+        // 要到本函式後面才會被賦值，這裡直接呼叫會撞到 TDZ；nextTick 保證等 setup() 整個跑完才執行。
+        watch(() => setup.value.currency, (c) => {
+            if (!newExpense.value.currency && c) {
+                newExpense.value.currency = c;
+                nextTick(() => applyFetchedRate(newExpense.value));
+            }
+        }, { immediate: true });
+        // 「幫誰付」多選預設值：目前使用中的所有成員（等同過去硬寫死 members.value.map(m=>m.id) 的行為，
+        // 差別是現在使用者之後可以自己調整多選）。只在真的需要重置整份表單時呼叫（見下方 createExpenseDraft），
+        // 平常使用者手動勾選/取消不會被這個函式覆蓋回去。
+        const defaultSplitIds = () => activeMembers.value.map(m => m.id);
+        // 產生一份全新的支出草稿（新增表單重置、切換旅程時都用這個，避免上一趟旅程的欄位殘留）。
+        // 只能在 setup/activeMembers 都已就緒之後呼叫（即模組初始化完成後的任何時間點），不能在檔案頂層立刻呼叫。
+        const createExpenseDraft = () => ({
+            title: '', category: 'other', amount: '',
+            currency: setup.value.currency || 'USD',
+            // 預設付款人是目前的身份（見打包清單既有的 activeChecklistMember/currentActorMemberId 機制）——
+            // 大多數時候「新增支出的人」就是「付錢的人」，不用每次都手動選一次自己。
+            paidByMemberId: currentActorMemberId.value || '',
+            splitAmongMemberIds: defaultSplitIds(),
+            splitMethod: 'equal',
+            customSplits: {},
+            notes: '',
+            // 同上：不預設 1，交給呼叫端在建立完 draft 後呼叫 applyFetchedRate 補上真的匯率（TWD 會立刻同步補 1，
+            // 其他幣別才會真的打 API）。
+            exchangeRateToTWD: null,
+            exchangeRateFetchedAt: null,
+            exchangeRateSource: 'same-currency',
+            exchangeRateLocked: true,
+            summaryCurrency: 'TWD',
+            expenseType: 'shared',
+        });
+        // ---- 支出類型快選（個人 / 共同 / 代付）：需求 F，讓新增支出時明確選「這是什麼性質的支出」-------------
+        // 這是表單層的「預設值捷徑」，不是新的資料欄位——實際存進 Firestore 的仍然只有 paidByMemberId/
+        // splitAmongMemberIds/splitMethod/customSplits 這四個既有欄位，事後用 expenseKind() 就能從這四個欄位
+        // 反推出這筆支出屬於哪一類，不需要另外存一個 type 欄位造成兩份真相。使用者選了「個人支出」之後又手動
+        // 把分攤對象改回多人，這筆支出下次讀回來就會被 expenseKind() 正確判斷成「共同支出」——這是刻意的行為，
+        // 因為分類永遠應該以實際資料為準，不是以「當初新增時點了哪個按鈕」為準。
+        const setExpenseType = (draft, type) => {
+            draft.expenseType = type;
+            if (type === 'personal') {
+                // 個人支出：付款人鎖定為自己，分攤對象固定只有自己，不進共同分帳
+                draft.paidByMemberId = currentActorMemberId.value || draft.paidByMemberId || '';
+                draft.splitMethod = 'personal';
+                draft.splitAmongMemberIds = draft.paidByMemberId ? [draft.paidByMemberId] : [];
+                draft.customSplits = {};
+            } else if (type === 'reimbursement') {
+                // 代付：付款人預設是自己（仍可改選其他人），分攤對象預設清空——逼使用者明確選被代付的人，
+                // 而不是沿用「共同支出」殘留的多選狀態（那樣容易把自己也算進分攤對象，變成「共同支出」而非代付）
+                if (draft.splitMethod === 'personal') draft.splitMethod = 'equal';
+                if (!draft.paidByMemberId) draft.paidByMemberId = currentActorMemberId.value || '';
+                draft.splitAmongMemberIds = [];
+                draft.customSplits = {};
+            } else {
+                // 共同支出：付款人/分攤對象都可自由選，預設分攤對象是全體現有成員（平分）
+                if (draft.splitMethod === 'personal') draft.splitMethod = 'equal';
+                if (!draft.splitAmongMemberIds.length) draft.splitAmongMemberIds = defaultSplitIds();
+            }
+        };
+        // 切換分攤方式：離開 personal 才把分攤對象還原成預設全員（避免使用者手動勾選的組合被平白清空）；
+        // 進入 personal 則固定只有付款人一人，這樣「個人支出不進共同分帳」不需要在結算邏輯另外特判
+        // （expenseMemberShares 對 personal 的處理本來就是「全額算在付款人自己頭上」，share=paid，淨額自然是 0）。
+        const setSplitMethod = (draft, method) => {
+            const prevMethod = draft.splitMethod;
+            draft.splitMethod = method;
+            if (method === 'personal') {
+                draft.splitAmongMemberIds = draft.paidByMemberId ? [draft.paidByMemberId] : [];
+            } else if (prevMethod === 'personal') {
+                draft.splitAmongMemberIds = defaultSplitIds();
+            }
+            if (method !== 'customAmount' && method !== 'customPercent') draft.customSplits = {};
+        };
+        // 個人支出模式下，分攤對象永遠等於付款人；付款人一換，分攤對象要跟著換，不然會變成「A 付錢但算在 B 頭上」
+        const onExpensePayerChange = (draft) => {
+            if (draft.splitMethod === 'personal') draft.splitAmongMemberIds = draft.paidByMemberId ? [draft.paidByMemberId] : [];
+        };
+        const toggleSplitMember = (draft, memberId) => {
+            const idx = draft.splitAmongMemberIds.indexOf(memberId);
+            if (idx === -1) {
+                draft.splitAmongMemberIds.push(memberId);
+                if (draft.customSplits[memberId] == null) draft.customSplits[memberId] = 0;
+            } else {
+                draft.splitAmongMemberIds.splice(idx, 1);
+                delete draft.customSplits[memberId];
+            }
+        };
+        // 自訂金額/比例目前選取成員的合計，用來即時提示使用者「還差多少才會等於總金額／100%」
+        const customSplitTotal = (draft) => draft.splitAmongMemberIds.reduce((s, id) => s + (Number(draft.customSplits[id]) || 0), 0);
+        const customSplitRemaining = (draft) => {
+            const total = customSplitTotal(draft);
+            const target = draft.splitMethod === 'customPercent' ? 100 : (Number(draft.amount) || 0);
+            return Math.round((target - total) * 100) / 100;
+        };
+        // ---- 支出表單驗證（需求 F）：回傳明確的錯誤訊息字串，不回傳籠統的「請檢查網路」；null 代表通過 ----
+        const validateExpenseDraft = (draft) => {
+            if (!draft.title || !draft.title.trim()) return '請輸入支出名稱';
+            const amt = Number(draft.amount);
+            if (!draft.amount || !(amt > 0)) return '請輸入有效金額';
+            if (!draft.paidByMemberId) return '請選擇付款者';
+            if (draft.splitMethod !== 'personal' && (!draft.splitAmongMemberIds || !draft.splitAmongMemberIds.length)) return '請至少選擇一位分攤對象';
+            // 需求 D4：非 TWD 支出一定要有換算成台幣的匯率，不能悄悄用 1 或任何預設值頂替，
+            // 否則總結算會把不同幣別的原始數字直接加在一起（就是這次要修的錯誤 bug 的根源）。
+            if ((draft.currency || 'TWD') !== 'TWD' && !(Number(draft.exchangeRateToTWD) > 0)) return '缺少匯率，請補齊';
+            if (draft.splitMethod === 'customAmount') {
+                const remain = customSplitRemaining(draft);
+                if (Math.abs(remain) > 0.01) return `自訂金額總和需等於支出金額（尚差 ${remain}）`;
+            }
+            if (draft.splitMethod === 'customPercent') {
+                const remain = customSplitRemaining(draft);
+                if (Math.abs(remain) > 0.01) return `自訂比例總和需為 100%（尚差 ${remain}%）`;
+            }
+            return null;
+        };
+        // ---- Firebase 寫入錯誤訊息（需求 F）：把 error.code 直接秀出來，不要籠統的「請檢查網路」 ----
+        // permission-denied 特別獨立出一句可以直接照著排查的提示：這種錯誤幾乎都不是使用者能自己解決的網路問題，
+        // 而是 Firestore 規則沒放行這個寫入路徑（例如 rules 檔案本機改了但還沒在 Firebase Console 發布），
+        // 所以訊息直接點名「請檢查 firestore.rules」，把排查方向指給看得懂的人（開發者/管理員），而不是叫使用者重試。
+        const firebaseErrorMessage = (e, fallback = '新增支出失敗') => {
+            if (e && e.code === 'permission-denied') return 'Firebase 權限不足，請檢查 firestore.rules';
+            if (e && (e.code === 'invalid-argument' || e.code === 'failed-precondition')) return 'Firebase 寫入失敗：欄位格式錯誤';
+            if (e && e.code) return `Firebase 寫入失敗：${e.code}`;
+            if (e && e.message) return `${fallback}：${e.message}`;
+            return `${fallback}，請稍後再試`;
+        };
+        // ---- 匯率快照欄位（需求 A/B/C）：currency 是 TWD 就固定 1 / same-currency；
+        // 不同的話沿用 draft 上已經有的 exchangeRateToTWD/exchangeRateSource（由 applyFetchedRate
+        // 自動抓或使用者手動輸入），存檔當下鎖死（exchangeRateLocked:true），之後最新匯率再變也不會回頭改這筆
+        // ——每筆支出的匯率快照只在使用者自己開這筆的編輯彈窗、手動按「更新此筆匯率」時才會變。
+        const buildExpenseRateFields = (draft) => {
+            if ((draft.currency || 'TWD') === 'TWD') {
+                return { exchangeRateToTWD: 1, exchangeRateSource: 'same-currency', exchangeRateFetchedAt: null, exchangeRateLocked: true, summaryCurrency: 'TWD' };
+            }
+            // 不可以在這裡 `|| 1` 頂替缺欄位的匯率（那樣就是這次要修的 bug 本身）：
+            // validateExpenseDraft 已經擋在存檔之前要求必須有正數匯率，這裡缺的話讓它保持 null，
+            // 讓 expenseNeedsRate/UI 警告清楚標示出來，而不是悄悄污染總額。
+            return {
+                exchangeRateToTWD: Number(draft.exchangeRateToTWD) > 0 ? Number(draft.exchangeRateToTWD) : null,
+                exchangeRateSource: draft.exchangeRateSource === 'api' ? 'api' : 'manual',
+                exchangeRateFetchedAt: draft.exchangeRateFetchedAt || null,
+                exchangeRateLocked: true,
+                summaryCurrency: 'TWD',
+            };
+        };
+        // ---- 自動抓匯率（需求 B）：直接抓「1 單位 currency = 多少 TWD」，不再繞經旅程 base currency 換算——
+        // 兩段式換算（currency→base→TWD）會讓「base currency 本身的支出」永遠沒有自己的 TWD 匯率快照，
+        // 只能依賴畫面上另一個會變動、沒鎖定的旅程匯率欄位，這正是總結算金額算錯的根本原因。
+        // API 失敗要讓使用者知道「匯率取得失敗，請手動輸入匯率」，不是籠統的網路錯誤，也不能整個 catch 吞掉不出聲
+        // ——console.error 一定要印，UI 也要有明確提示。免金鑰 API（exchangerate-api.com），前端可直接呼叫。
+        const applyFetchedRate = async (draft) => {
+            if (!draft.currency || draft.currency === 'TWD') {
+                draft.exchangeRateToTWD = 1; draft.exchangeRateSource = 'same-currency'; draft.exchangeRateFetchedAt = null;
+                return;
+            }
+            draft.exchangeRateSource = 'loading';
+            try {
+                const res = await fetch(`https://api.exchangerate-api.com/v4/latest/${draft.currency}`);
+                if (!res.ok) throw new Error(`http-${res.status}`);
+                const data = await res.json();
+                const rate = data?.rates?.TWD;
+                if (!rate) throw new Error('rate-not-found');
+                draft.exchangeRateToTWD = rate;
+                draft.exchangeRateSource = 'api';
+                draft.exchangeRateFetchedAt = new Date().toISOString();
+            } catch (e) {
+                console.error('Fetch exchange rate failed', e);
+                draft.exchangeRateSource = 'manual';
+                draft.exchangeRateFetchedAt = null;
+                showToast('匯率取得失敗，請手動輸入匯率', { icon: 'ph-bold ph-warning' });
+            }
+        };
 
         const currentDay = computed(() => days.value[currentDayIdx.value] || { items: [], flight: null, date: '', title: '' });
+        // 一般 timeline 一律不顯示航班：正常情況下 day.items 不會混進 type:'flight' 的項目（航班只會產生/更新
+        // day.flight，見 syncFlightBookingToFlightInfo），這裡多一層 filter 純粹是防禦性的，避免未來哪裡不小心
+        // 又把航班塞進一般 itinerary item。
+        const currentDayTimelineItems = computed(() => (currentDay.value.items || []).filter(i => i && i.type !== 'flight'));
+        // editingState.flight 是全站共用的單一旗標（不是逐日各自一份）：換日期卡片時若沒重置，
+        // 上一天忘記按「完成」就切走的話，會讓下一天的航班卡片也卡在編輯模式（看不到摘要/轉機時間）。
+        watch(currentDayIdx, () => { editingState.dayTitle = false; editingState.flight = false; });
 
+        // ---- 記帳分類 / 分攤方式常數 ----------------------------------------------------------------
+        const EXPENSE_CATEGORIES = [
+            { slug: 'lodging', label: '住宿', icon: 'ph-bold ph-bed' },
+            { slug: 'food', label: '餐飲', icon: 'ph-bold ph-fork-knife' },
+            { slug: 'transport', label: '交通', icon: 'ph-bold ph-car' },
+            { slug: 'ticket', label: '門票', icon: 'ph-bold ph-ticket' },
+            { slug: 'shopping', label: '購物', icon: 'ph-bold ph-shopping-bag' },
+            { slug: 'other', label: '其他', icon: 'ph-bold ph-dots-three-circle' },
+        ];
+        const expenseCategoryLabel = (slug) => EXPENSE_CATEGORIES.find(c => c.slug === slug)?.label || '其他';
+        const expenseCategoryIcon = (slug) => EXPENSE_CATEGORIES.find(c => c.slug === slug)?.icon || 'ph-bold ph-dots-three-circle';
+        const SPLIT_METHODS = [
+            { slug: 'equal', label: '平分' },
+            { slug: 'personal', label: '個人支出' },
+            { slug: 'customAmount', label: '自訂金額' },
+            { slug: 'customPercent', label: '自訂比例' },
+        ];
+        const splitMethodLabel = (slug) => SPLIT_METHODS.find(m => m.slug === slug)?.label || '平分';
+        // 「共同支出」「代付」底下的分攤方式子選單：不重複顯示「個人支出」——那個由上層的「支出類型」
+        // 快選負責，兩個地方都能選「個人支出」會讓使用者搞不清楚要點哪一個。
+        const SHARED_SPLIT_METHODS = SPLIT_METHODS.filter(m => m.slug !== 'personal');
+        const EXPENSE_TYPE_OPTIONS = [
+            { slug: 'personal', label: '個人支出', icon: 'ph-bold ph-user' },
+            { slug: 'shared', label: '共同支出', icon: 'ph-bold ph-users-three' },
+            { slug: 'reimbursement', label: '幫別人代付', icon: 'ph-bold ph-hand-coins' },
+        ];
+
+        // ---- 記帳頁防呆：記帳頁不可以因為任何一筆 expense/member 缺欄位就整頁空白 -------------------------
+        // moneyViewError 是記帳頁專屬的錯誤旗標（不影響 itinerary/bookings/checklist 等其他頁面），
+        // 任何一個結算相關 computed 內部發生非預期錯誤時都會設這個值，UI 端顯示「記帳資料載入失敗」banner，
+        // 而不是整頁 crash 變白畫面；真正的錯誤內容一律 console.error 出來方便排查。
+        const moneyViewError = ref('');
+        const reportMoneyViewError = (where, err) => {
+            console.error(`[記帳頁] ${where} 失敗`, err);
+            moneyViewError.value = `記帳資料載入失敗，請檢查某筆支出資料（${where}）`;
+        };
+        // ---- normalizeExpense（需求 D）：把任何一筆 expense 攤平成後面計算/畫面永遠能安全讀取的形狀。
+        // 涵蓋三類舊資料落差：(1) 更早期 schema 用 paidBy/splitAmong 存「名字」而不是 paidByMemberId/
+        // splitAmongMemberIds 存「memberId」；(2) currency/amount 缺欄位或格式壞掉；(3) 這次修正之前建立、
+        // 沒有 exchangeRateToTWD 快照的支出。只在記憶體裡正規化，不會寫回 Firestore——避免「畫面看到的」
+        // 跟「資料庫存的」兩邊不一致，使用者要真的補齊資料還是得透過編輯彈窗存檔。
+        const normalizeExpense = (raw) => {
+            if (!raw || typeof raw !== 'object') return null;
+            const warnings = [];
+            const e = { ...raw };
+
+            // 1. paidByMemberId 缺失但有舊版 paidBy（名字字串）時，嘗試對應 trip.members
+            if (!e.paidByMemberId && e.paidBy) {
+                const id = memberIdByName(e.paidBy);
+                if (id) e.paidByMemberId = id; else warnings.push('付款人資料找不到對應成員');
+            }
+            // 2. splitAmongMemberIds 缺失但有舊版 splitAmong（名字陣列）時，嘗試轉成 memberId array
+            if ((!e.splitAmongMemberIds || !e.splitAmongMemberIds.length) && Array.isArray(e.splitAmong) && e.splitAmong.length) {
+                const ids = e.splitAmong.map(memberIdByName).filter(Boolean);
+                if (ids.length) e.splitAmongMemberIds = ids; else warnings.push('分攤對象找不到對應成員');
+            }
+            if (!Array.isArray(e.splitAmongMemberIds)) e.splitAmongMemberIds = [];
+
+            // 3. currency 缺失時顯示 Unknown，不要 crash（後面 expenseNeedsRate 會因此正確標示缺匯率）
+            if (!e.currency) { e.currency = 'Unknown'; warnings.push('缺少幣別'); }
+
+            // 4. amount 轉成 number，無效時標記 warning 並退回 0（不能讓 NaN 一路傳染到加總）
+            const amt = Number(e.amount);
+            if (!Number.isFinite(amt)) { e.amount = 0; warnings.push('金額格式錯誤'); } else { e.amount = amt; }
+
+            // 5/6. exchangeRateToTWD：TWD 補 1；非 TWD 缺匯率不可以補 1，只能標警告讓 UI 顯示「缺少匯率，請補齊」
+            if (!(Number(e.exchangeRateToTWD) > 0)) {
+                if (e.currency === 'TWD') { e.exchangeRateToTWD = 1; }
+                else { e.exchangeRateToTWD = null; warnings.push('缺少匯率，請補齊'); }
+            } else {
+                e.exchangeRateToTWD = Number(e.exchangeRateToTWD);
+            }
+
+            // 7. summaryAmountTWD 缺失時，若匯率已知就重新算一次（純顯示用，exchangeRateToTWD 才是唯一真相）
+            if (!(Number(e.summaryAmountTWD) >= 0) && Number(e.exchangeRateToTWD) > 0) {
+                e.summaryAmountTWD = e.amount * e.exchangeRateToTWD;
+            }
+
+            if (warnings.length) e.normalizeWarnings = warnings;
+            return e;
+        };
         // ---- 記帳 / 結算：settlement 一律從「目前未刪除的 expenses」即時算出來，不手動存一份「誰欠誰」的結果 ----
         // 好處：這份結果永遠跟 expenses 一致，不會有「改了支出但結算沒跟著更新」或兩邊對不上的情形。
-        const activeExpenses = computed(() => expenses.value.filter(e => e && !e.deleted));
+        // 每筆都先過 normalizeExpense，單筆壞資料只會讓那一筆被跳過（並記一次錯誤），不會讓整個記帳頁死掉。
+        const activeExpenses = computed(() => {
+            try {
+                return expenses.value
+                    .map(raw => { try { return normalizeExpense(raw); } catch (err) { console.error('normalizeExpense failed', err, raw); return null; } })
+                    .filter(e => e && !e.deleted);
+            } catch (err) {
+                reportMoneyViewError('activeExpenses', err);
+                return [];
+            }
+        });
         // 依 createdAt 新到舊排序：expenses 現在來自 subcollection 的 onSnapshot，Firestore 不保證回傳順序
-        const visibleExpenses = computed(() => activeExpenses.value.slice().sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || '')));
-        const totalExpense = computed(() => activeExpenses.value.reduce((sum, e) => sum + (Number(e.amount) || 0), 0));
-        // 每人「實付」：只算這人是 paidByMemberId 的支出加總
-        const paidByPerson = computed(() => {
-            const map = {}; participants.value.forEach(p => map[p] = 0);
-            activeExpenses.value.forEach(e => {
-                const name = memberNameById(e.paidByMemberId);
-                if (!name) return;
-                if (map[name] === undefined) map[name] = 0;
-                map[name] += Number(e.amount) || 0;
-            });
-            return map;
+        const visibleExpenses = computed(() => {
+            try {
+                return activeExpenses.value.slice().sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''));
+            } catch (err) {
+                reportMoneyViewError('visibleExpenses', err);
+                return [];
+            }
         });
-        // 每人「應付」：依 splitAmongMemberIds 平均分攤（MVP 只支援 equal；欄位已預留 splitMethod 供之後擴充自訂比例/指定金額）
-        const owedByPerson = computed(() => {
-            const map = {}; participants.value.forEach(p => map[p] = 0);
-            activeExpenses.value.forEach(e => {
-                const ids = (e.splitAmongMemberIds && e.splitAmongMemberIds.length) ? e.splitAmongMemberIds : members.value.map(m => m.id);
-                if (!ids.length) return;
-                const share = (Number(e.amount) || 0) / ids.length;
-                ids.forEach(id => {
-                    const name = memberNameById(id);
-                    if (!name) return;
-                    if (map[name] === undefined) map[name] = 0;
-                    map[name] += share;
-                });
-            });
-            return map;
+        // 換算成台幣的金額（需求 D）：TWD 支出直接用原始金額；其他幣別必須用「這筆支出自己儲存」的
+        // exchangeRateToTWD 快照，之後最新匯率再怎麼變都不會回頭改這筆歷史帳（需求 C 匯率鎖定規則 2）。
+        // 缺匯率的舊資料/例外情況一律回傳 0，不能 `|| 1` 頂替——那正是「USD 703 被當成 703 TWD 直接加總」
+        // 這個 bug 的根源。缺匯率的支出改由 expenseNeedsRate/expensesMissingRate 標示警告，UI 上明確提示補齊，
+        // 而不是讓總額悄悄用錯的數字。
+        const expenseAmountTWD = (e) => {
+            if (!e) return 0;
+            const amt = Number(e.amount) || 0;
+            if ((e.currency || 'TWD') === 'TWD') return amt;
+            const rate = Number(e.exchangeRateToTWD);
+            return rate > 0 ? amt * rate : 0;
+        };
+        const totalExpense = computed(() => {
+            try {
+                return activeExpenses.value.reduce((sum, e) => sum + expenseAmountTWD(e), 0);
+            } catch (err) {
+                reportMoneyViewError('totalExpense', err);
+                return 0;
+            }
         });
-        // net balance = 實付 - 應付；> 0 代表這人墊了錢（該收錢），< 0 代表這人欠錢
-        const netBalanceByPerson = computed(() => {
-            const map = {};
-            participants.value.forEach(p => map[p] = (paidByPerson.value[p] || 0) - (owedByPerson.value[p] || 0));
-            return map;
-        });
+        // 單筆支出「每個成員分攤多少」（原始幣別金額）。splitMethod：
+        // - personal：個人支出，全額算在付款人自己頭上（分攤對象固定只有付款人），不進共同分帳——
+        //   這樣付款人的 paid - share = 0，不需要另外在結算/轉帳邏輯裡特判「這筆不算」。
+        // - customAmount / customPercent：直接照 customSplits 指定的金額／比例分。
+        // - equal（含未設定時的預設）：splitAmongMemberIds 平分；若這欄位是空的（理論上不該發生，欄位已在
+        //   表單強制至少選一人），退回付款人自己一人，避免這筆支出憑空消失在結算裡。
+        const expenseMemberShares = (e) => {
+            const amount = Number(e.amount) || 0;
+            if (e.splitMethod === 'personal') return e.paidByMemberId ? { [e.paidByMemberId]: amount } : {};
+            const ids = (e.splitAmongMemberIds && e.splitAmongMemberIds.length) ? e.splitAmongMemberIds : (e.paidByMemberId ? [e.paidByMemberId] : []);
+            if (!ids.length) return {};
+            if (e.splitMethod === 'customAmount' && e.customSplits) {
+                const out = {}; ids.forEach(id => { out[id] = Number(e.customSplits[id]) || 0; }); return out;
+            }
+            if (e.splitMethod === 'customPercent' && e.customSplits) {
+                const out = {}; ids.forEach(id => { out[id] = amount * (Number(e.customSplits[id]) || 0) / 100; }); return out;
+            }
+            const share = amount / ids.length;
+            const out = {}; ids.forEach(id => { out[id] = share; }); return out;
+        };
+        // ---- 支出分類：個人 personal / 代付 reimbursement / 共同 shared ------------------------------
+        // 純粹從 paidByMemberId + splitAmongMemberIds + splitMethod 三個既有欄位判斷出來，不另外存一個
+        // type 欄位——存了反而會有「type 跟實際 split 欄位兜不起來」的兩份真相風險（例如編輯時只改了
+        // splitAmongMemberIds 卻忘記同步改 type）。分類規則跟使用者需求文件一致：
+        //   personal：splitMethod === 'personal'，或分攤對象只有付款人自己一個
+        //   reimbursement：付款人不在分攤對象名單裡（可能代付一人或多人，但自己不用出錢）
+        //   shared：其餘情況（分攤對象含 2 人以上，且付款人也在其中）
+        const expenseKind = (e) => {
+            if (!e) return 'shared';
+            if (e.splitMethod === 'personal') return 'personal';
+            const among = (e.splitAmongMemberIds && e.splitAmongMemberIds.length) ? e.splitAmongMemberIds : (e.paidByMemberId ? [e.paidByMemberId] : []);
+            if (among.length <= 1 && among[0] === e.paidByMemberId) return 'personal';
+            if (e.paidByMemberId && !among.includes(e.paidByMemberId)) return 'reimbursement';
+            return 'shared';
+        };
+        const expenseKindLabel = (k) => ({ personal: '個人支出', reimbursement: '代付', shared: '共同支出' }[k] || '共同支出');
+        // 這筆支出「預設」該不該讓 memberId 這個人在列表裡看到：
+        // - shared：所有人都看得到——共同分攤的錢需要彼此核對，避免誤植，故意不做隱藏。
+        // - personal：只有本人。
+        // - reimbursement：只有付款人跟被代付的人（其他不相干的旅伴不需要看到這筆「W 幫 J 買票」的細節）。
+        // 這只影響「列表要不要顯示這張卡片」，不影響 settlement 計算——settlement 一律用全部資料算，
+        // 每個人只是看到跟自己有關的那一部分結果，不代表其他人的錢就沒被正確算進去。
+        const expenseVisibleToMember = (e, memberId) => {
+            const kind = expenseKind(e);
+            if (kind === 'shared') return true;
+            if (kind === 'personal') return e.paidByMemberId === memberId;
+            return e.paidByMemberId === memberId || (e.splitAmongMemberIds || []).includes(memberId);
+        };
         // 誰欠誰：貪心債務簡化（欠最多的付給收最多的，逐步清零），把 net balance 換算成建議轉帳筆數最少的方案
-        const settlementTransfers = computed(() => {
-            const balances = participants.value
-                .map(p => ({ name: p, balance: netBalanceByPerson.value[p] || 0 }))
+        const computeGreedyTransfers = (netMap, idToName) => {
+            const balances = Object.entries(netMap)
+                .map(([id, balance]) => ({ id, name: idToName(id) || id, balance }))
                 .filter(b => Math.abs(b.balance) > 0.01);
             const creditors = balances.filter(b => b.balance > 0).sort((a, b) => b.balance - a.balance).map(b => ({ ...b }));
             const debtors = balances.filter(b => b.balance < 0).sort((a, b) => a.balance - b.balance).map(b => ({ ...b }));
@@ -150,12 +482,210 @@ createApp({
             while (ci < creditors.length && di < debtors.length) {
                 const c = creditors[ci], d = debtors[di];
                 const amt = Math.min(c.balance, -d.balance);
-                if (amt > 0.01) transfers.push({ from: d.name, to: c.name, amount: Math.round(amt * 100) / 100 });
+                if (amt > 0.01) transfers.push({ fromId: d.id, from: d.name, toId: c.id, to: c.name, amount: Math.round(amt * 100) / 100 });
                 c.balance -= amt; d.balance += amt;
                 if (Math.abs(c.balance) < 0.01) ci++;
                 if (Math.abs(d.balance) < 0.01) di++;
             }
             return transfers;
+        };
+        // 每一種原始幣別各自獨立結算（需求 C）：同一筆支出只會落在自己的 currency 分組裡，
+        // 不會跨幣別互抵——USD 的債務只能用 USD 轉帳結清，TWD 另外結。base currency 一定會出現在清單第一位，
+        // 即使目前沒有任何 base currency 的支出，也讓「已結清」狀態有地方顯示。
+        const expenseCurrency = (e) => e.currency || setup.value.currency || 'USD';
+        const usedCurrencies = computed(() => {
+            const base = setup.value.currency || 'USD';
+            const others = Array.from(new Set(activeExpenses.value.map(expenseCurrency))).filter(c => c !== base).sort();
+            return [base, ...others];
+        });
+        // paid/share/net/誰欠誰只能算「共同支出＋代付」（nonPersonalExpenses），個人支出不能混進來：
+        // personal 的 paid 剛好等於 share（見 expenseMemberShares），淨額算出來雖然還是 0、不影響其他人，
+        // 但這兩個表格是「全體結算」畫面，所有旅伴都看得到——如果把個人支出金額也灌進 paid/share，
+        // 等於間接讓別人看到「這個人今天個人花了多少錢」，違反個人支出只有本人看得到的隱私規則。
+        // total（原始幣別小計／旅程總支出）則刻意仍然算全部（含個人）——那是「這趟旅程總共花了多少錢」的
+        // 誠實總額，跟「誰欠誰」是兩件事，不需要為了隱私而縮水。
+        const nonPersonalExpenses = computed(() => activeExpenses.value.filter(e => expenseKind(e) !== 'personal'));
+        const settlementByCurrency = computed(() => {
+            try {
+                const memberIds = safeMembers.value.map(m => m.id);
+                return usedCurrencies.value.map(cur => {
+                    const paid = {}; const share = {};
+                    memberIds.forEach(id => { paid[id] = 0; share[id] = 0; });
+                    const inCurrencyAll = activeExpenses.value.filter(e => expenseCurrency(e) === cur);
+                    const inCurrencyShared = nonPersonalExpenses.value.filter(e => expenseCurrency(e) === cur);
+                    inCurrencyShared.forEach(e => {
+                        if (e.paidByMemberId) paid[e.paidByMemberId] = (paid[e.paidByMemberId] || 0) + (Number(e.amount) || 0);
+                        Object.entries(expenseMemberShares(e)).forEach(([id, v]) => { share[id] = (share[id] || 0) + v; });
+                    });
+                    const net = {}; memberIds.forEach(id => { net[id] = (paid[id] || 0) - (share[id] || 0); });
+                    return {
+                        currency: cur,
+                        total: inCurrencyAll.reduce((s, e) => s + (Number(e.amount) || 0), 0),
+                        paid, share, net,
+                        transfers: computeGreedyTransfers(net, memberNameById),
+                    };
+                });
+            } catch (err) {
+                reportMoneyViewError('settlementByCurrency', err);
+                return [];
+            }
+        });
+        // ---- 總結算主要顯示幣別固定為台幣（需求 E/F/J）：不再區分「trip base currency」跟「summary currency」
+        // 兩套換算——每筆 expense 都直接鎖了自己的 exchangeRateToTWD，總結算/每人淨額一律用這一份台幣快照加總，
+        // 不會有「base currency 支出沒有自己的匯率快照，得現抓一個沒鎖定的旅程共用匯率」這種落差（就是原本的 bug）。
+        // 個人支出不計入 paid/share/net（見 nonPersonalExpenses 的說明），total 則刻意仍計入全部（含個人）。
+        // 找不到 computed 的 net/paid/share 時使用的安全預設值（需求 B）：任何呼叫端與其直接讀
+        // undefined.net，都應該先用 `xxx || createEmptyMemberSummary()` 頂一份這個形狀。
+        const createEmptyMemberSummary = () => ({
+            paidByCurrency: {}, shareByCurrency: {}, netByCurrency: {},
+            paidSummaryTWD: 0, shareSummaryTWD: 0, netSummaryTWD: 0,
+            net: 0, warnings: [],
+        });
+        const twdSummary = computed(() => {
+            try {
+                const memberIds = safeMembers.value.map(m => m.id);
+                const paid = {}; const share = {};
+                memberIds.forEach(id => { paid[id] = 0; share[id] = 0; });
+                nonPersonalExpenses.value.forEach(e => {
+                    if (expenseNeedsRate(e)) return; // 缺匯率的支出不能悄悄用錯的數字污染總覽，改由 expensesMissingRate 警告
+                    const rate = (e.currency || 'TWD') === 'TWD' ? 1 : Number(e.exchangeRateToTWD);
+                    if (e.paidByMemberId) paid[e.paidByMemberId] = (paid[e.paidByMemberId] || 0) + (Number(e.amount) || 0) * rate;
+                    Object.entries(expenseMemberShares(e)).forEach(([id, v]) => { share[id] = (share[id] || 0) + v * rate; });
+                });
+                const net = {}; memberIds.forEach(id => { net[id] = (paid[id] || 0) - (share[id] || 0); });
+                return { total: totalExpense.value, paid, share, net };
+            } catch (err) {
+                reportMoneyViewError('twdSummary', err);
+                return { total: 0, paid: {}, share: {}, net: {} };
+            }
+        });
+        // ---- 「全體結算」內「每位成員總覽」只能用純共同支出（shared，不含 reimbursement）：
+        // reimbursement 依規則只有付款人與受益人看得到，但「每位成員總覽」是所有旅伴都看得到的畫面，
+        // 如果 paid/share/淨額混進 reimbursement，等於把「誰幫誰代付了多少」這種只該讓當事人知道的錢
+        // 攤在所有人面前，違反代付隱私規則。「誰欠誰」轉帳建議刻意仍用 settlementByCurrency（含 reimbursement），
+        // 才能正確算出真實欠款——這裡只是另外算一份「乾淨」的顯示用數字，不影響原本的結算公式。
+        const sharedOnlyExpenses = computed(() => activeExpenses.value.filter(e => expenseKind(e) === 'shared'));
+        const sharedOnlySettlementByCurrency = computed(() => {
+            try {
+                const memberIds = safeMembers.value.map(m => m.id);
+                return usedCurrencies.value.map(cur => {
+                    const paid = {}; const share = {};
+                    memberIds.forEach(id => { paid[id] = 0; share[id] = 0; });
+                    sharedOnlyExpenses.value.filter(e => expenseCurrency(e) === cur).forEach(e => {
+                        if (e.paidByMemberId) paid[e.paidByMemberId] = (paid[e.paidByMemberId] || 0) + (Number(e.amount) || 0);
+                        Object.entries(expenseMemberShares(e)).forEach(([id, v]) => { share[id] = (share[id] || 0) + v; });
+                    });
+                    const net = {}; memberIds.forEach(id => { net[id] = (paid[id] || 0) - (share[id] || 0); });
+                    return { currency: cur, paid, share, net };
+                });
+            } catch (err) {
+                reportMoneyViewError('sharedOnlySettlementByCurrency', err);
+                return [];
+            }
+        });
+        const sharedOnlyNetTWD = computed(() => {
+            try {
+                const memberIds = safeMembers.value.map(m => m.id);
+                const net = {}; memberIds.forEach(id => { net[id] = 0; });
+                sharedOnlyExpenses.value.forEach(e => {
+                    if (expenseNeedsRate(e)) return;
+                    const rate = (e.currency || 'TWD') === 'TWD' ? 1 : Number(e.exchangeRateToTWD);
+                    if (e.paidByMemberId) net[e.paidByMemberId] = (net[e.paidByMemberId] || 0) + (Number(e.amount) || 0) * rate;
+                    Object.entries(expenseMemberShares(e)).forEach(([id, v]) => { net[id] = (net[id] || 0) - v * rate; });
+                });
+                return net;
+            } catch (err) {
+                reportMoneyViewError('sharedOnlyNetTWD', err);
+                return {};
+            }
+        });
+        // ---- 「約合 {{ trip base currency }}」次要參考（需求 E 第 3 點，選配）：只用來給習慣看 USD 的人一個
+        // 大概的數字，不是任何計算的依據。刻意不用畫面上可編輯、沒鎖定的旅程匯率欄位反推（那正是原本 bug 的源頭），
+        // 而是取「最近一筆 base currency 支出」自己鎖定的 exchangeRateToTWD 當作目前的參考匯率——
+        // 這樣就一定是某筆支出當下真實抓到/輸入過的匯率，不會出現「1 USD ≈ NT$1」這種沒人真的輸入過的預設值。
+        // 找不到任何一筆已有匯率快照的 base currency 支出時，回傳 null，UI 端直接不顯示這個參考區塊。
+        const secondaryReferenceRate = computed(() => {
+            try {
+                const base = setup.value.currency || 'USD';
+                if (base === 'TWD') return null;
+                const candidates = activeExpenses.value
+                    .filter(e => (e.currency || base) === base && Number(e.exchangeRateToTWD) > 0)
+                    .sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''));
+                return candidates.length ? Number(candidates[0].exchangeRateToTWD) : null;
+            } catch (err) {
+                reportMoneyViewError('secondaryReferenceRate', err);
+                return null;
+            }
+        });
+        const secondaryReferenceTotal = computed(() => {
+            try {
+                const rate = secondaryReferenceRate.value;
+                return rate > 0 ? totalExpense.value / rate : null;
+            } catch (err) {
+                reportMoneyViewError('secondaryReferenceTotal', err);
+                return null;
+            }
+        });
+        // 某人「個人開銷」小計，依原始幣別分開（需求 B「個人開銷：USD 160」），跟上面的 paid/share 完全分開算，
+        // 只有本人自己看得到（見下方 myPersonalExpensesList 的可見性判斷）。
+        const memberPersonalTotalsByCurrency = (memberId) => {
+            const totals = {};
+            activeExpenses.value
+                .filter(e => expenseKind(e) === 'personal' && e.paidByMemberId === memberId)
+                .forEach(e => { const cur = e.currency || setup.value.currency || 'USD'; totals[cur] = (totals[cur] || 0) + (Number(e.amount) || 0); });
+            return totals;
+        };
+
+        // ---- 個人視角 + 共同帳本：記帳頁從「大家都看全部支出」改成「以目前使用者為中心」--------------------
+        // 「我是誰」刻意沿用打包清單既有的裝置身份機制（activeChecklistMember/chooseChecklistMember/
+        // checklistMembers，見下方打包清單區塊），不另外做第二套 localStorage 識別、也不另外存一個
+        // currentMemberIdForTrip_{tripId}——同一趟旅程只需要選一次「我是誰」，清單和記帳共用同一份身份，
+        // 使用者不用選兩次、兩邊也不會不同步。currentActorMemberId 本來就是從 activeChecklistMember 換算出
+        // 對應的 memberId，這裡只是取一個在記帳情境下更好懂的名字。
+        const currentMemberId = currentActorMemberId;
+        // 共同帳本：所有 shared 支出，所有旅伴都看得到（需求 A3／D2：大家要能核對是否誤植）
+        const sharedExpensesList = computed(() => visibleExpenses.value.filter(e => expenseKind(e) === 'shared'));
+        // 「旅程總支出」主卡片展開/收合細項的開關
+        const showTripTotalDetail = ref(false);
+        // 我的個人支出：只顯示 currentMemberId 自己的 personal 支出，不顯示其他旅伴的（需求 B3／D1）
+        const myPersonalExpensesList = computed(() => {
+            const me = currentMemberId.value;
+            if (!me) return [];
+            return visibleExpenses.value.filter(e => expenseKind(e) === 'personal' && e.paidByMemberId === me);
+        });
+        // 與我有關的代付/被代付：只顯示付款人或被代付人是我自己的那些（需求 B4／D3）
+        const myReimbursementExpensesList = computed(() => {
+            const me = currentMemberId.value;
+            if (!me) return [];
+            return visibleExpenses.value.filter(e => expenseKind(e) === 'reimbursement' && expenseVisibleToMember(e, me));
+        });
+        // 「我的總覽」：把 settlementByCurrency（已排除個人支出）依目前身份抽出我自己那一列 + 跟我有關的轉帳建議，
+        // 再補上我自己的個人開銷小計。currency 清單取「settlementByCurrency 用到的幣別」和「我個人支出用到的
+        // 幣別」的聯集——避免我只有一筆 JPY 個人支出、但沒有任何人共同分攤 JPY 時，這個幣別憑空消失不顯示。
+        const mySettlementByCurrency = computed(() => {
+            try {
+                const me = currentMemberId.value;
+                if (!me) return [];
+                const personalTotals = memberPersonalTotalsByCurrency(me) || {};
+                const base = setup.value.currency || 'USD';
+                const currencies = new Set((settlementByCurrency.value || []).map(g => g.currency));
+                Object.keys(personalTotals).forEach(c => currencies.add(c));
+                const ordered = [base, ...Array.from(currencies).filter(c => c !== base).sort()];
+                return ordered.map(cur => {
+                    const g = (settlementByCurrency.value || []).find(x => x.currency === cur);
+                    return {
+                        currency: cur,
+                        paid: g ? (g.paid?.[me] || 0) : 0,
+                        share: g ? (g.share?.[me] || 0) : 0,
+                        net: g ? (g.net?.[me] || 0) : 0,
+                        personal: personalTotals[cur] || 0,
+                        transfers: g && Array.isArray(g.transfers) ? g.transfers.filter(t => t.fromId === me || t.toId === me) : [],
+                    };
+                }).filter(g => g.paid || g.share || g.personal || g.transfers.length);
+            } catch (err) {
+                reportMoneyViewError('mySettlementByCurrency', err);
+                return [];
+            }
         });
         // 成員新增/刪除（直接同步 participantsStr 供存檔；participants 為顯示來源）
         const newParticipant = ref('');
@@ -165,7 +695,11 @@ createApp({
             participants.value.push(name);
             participantsStr.value = participants.value.join(', ');
             const id = ensureMemberRecord(name); // 立刻登記，不等 watch(participants) 非同步觸發，避免下面拿不到 id
-            if (!newExpense.value.payerMemberId) newExpense.value.payerMemberId = id;
+            if (!newExpense.value.paidByMemberId) newExpense.value.paidByMemberId = id;
+            // 新加入的人預設也算進「幫誰付」的分攤對象，個人支出模式下分攤對象固定只有付款人，不受影響
+            if (newExpense.value.splitMethod !== 'personal' && !newExpense.value.splitAmongMemberIds.includes(id)) {
+                newExpense.value.splitAmongMemberIds.push(id);
+            }
             newParticipant.value = '';
         };
         const removeParticipant = (name) => {
@@ -173,10 +707,114 @@ createApp({
             participants.value = participants.value.filter(p => p !== name);
             participantsStr.value = participants.value.join(', ');
             // 不刪 member 記錄本身（舊支出還指著這個 id），只在「目前選的付款人剛好是被移除的這個人」時換掉
-            if (newExpense.value.payerMemberId === removedId) newExpense.value.payerMemberId = memberIdByName(participants.value[0]) || '';
+            if (newExpense.value.paidByMemberId === removedId) newExpense.value.paidByMemberId = memberIdByName(participants.value[0]) || '';
+            newExpense.value.splitAmongMemberIds = newExpense.value.splitAmongMemberIds.filter(id => id !== removedId);
+            if (newExpense.value.customSplits && removedId) delete newExpense.value.customSplits[removedId];
         };
+        // 多幣別記帳（需求 D）：CURRENCY_SYMBOLS 同時當「幣別代碼下拉選單」的選項來源與符號對照表，
+        // trip baseCurrency（setup.currency）若剛好不在這張表裡（例如 AUD），currencyCodeOptions 會自動補上，
+        // 確保下拉選單一定選得到目前的 base currency，不會因為不在清單裡而顯示空白。
+        const CURRENCY_SYMBOLS = { 'JPY': '¥', 'CNY': '¥', 'USD': '$', 'EUR': '€', 'KRW': '₩', 'GBP': '£', 'TWD': 'NT$', 'HKD': 'HK$', 'THB': '฿', 'VND': '₫' };
+        const symbolForCurrency = (code) => CURRENCY_SYMBOLS[code] || (code ? code + ' ' : '$');
+        const currencyCodeOptions = computed(() => {
+            const codes = Object.keys(CURRENCY_SYMBOLS);
+            return setup.value.currency && !codes.includes(setup.value.currency) ? [...codes, setup.value.currency] : codes;
+        });
         const currencyLabel = computed(() => setup.value.currency || '外幣');
-        const currencySymbol = computed(() => { const map = { 'JPY': '¥', 'CNY': '¥', 'USD': '$', 'EUR': '€', 'KRW': '₩', 'GBP': '£', 'TWD': 'NT$', 'HKD': 'HK$', 'THB': '฿', 'VND': '₫' }; return map[setup.value.currency] || '$'; });
+        const currencySymbol = computed(() => symbolForCurrency(setup.value.currency));
+        // 結算/總覽金額一律用這個格式化，不能整數 Math.round——分帳常常會出現 .5（例如兩人分攤奇數總額），
+        // 直接四捨五入到整數會把「W net: +147.5」顯示成「+148」，數字對不上使用者自己心算的結果（需求：
+        // Member Summary / Final Settlement 必須保留到小數點後兩位）。用 toLocaleString 的 maximumFractionDigits
+        // 讓整數金額仍顯示 "375" 不會多出 ".00"，只有真的有小數時才顯示到兩位。
+        const fmtMoney = (n) => (Math.round((Number(n) || 0) * 100) / 100).toLocaleString(undefined, { maximumFractionDigits: 2, minimumFractionDigits: 0 });
+        // 需求 D4/H：非 TWD 但缺 exchangeRateToTWD 的支出（通常是這次修正之前建立的舊資料）——不能讓 settlement
+        // 崩潰，也不能悄悄假裝匯率是 1（那樣算出來的台幣總額會是錯的又不會有任何提示，就是原本的 bug）。
+        // expenseAmountTWD 那層計算安全地退回 0（不會把原始數字直接灌進總額），這裡另外標記出來，UI 顯示明確警告
+        // 並提供「補齊匯率」入口（開編輯彈窗）。
+        const expenseNeedsRate = (e) => !!(e && e.currency && e.currency !== 'TWD' && !(Number(e.exchangeRateToTWD) > 0));
+        const expensesMissingRate = computed(() => {
+            try {
+                return activeExpenses.value.filter(expenseNeedsRate);
+            } catch (err) {
+                reportMoneyViewError('expensesMissingRate', err);
+                return [];
+            }
+        });
+        // ---- 我的旅程總支出（記帳頁主卡片改版）：Total Expense 不再是「全員支出總和」，
+        // 而是「目前這個人自己的旅程花費」= 個人支出 + 共同支出的自己分攤額 + 與自己有關代付中「自己受益」的部分。
+        // 關鍵是 expenseMemberShares(e)[memberId]：這個既有函式本來就已經依 splitMethod 算出「這筆支出這個人該出多少」——
+        // personal 全額算給付款人自己、shared 依比例分、reimbursement 只有受益人有份、付款人是 0——
+        // 所以 personal/shared/reimbursement 三種情況天生統一在同一條公式裡，不必分開寫三段加總邏輯，
+        // 也不會有「歸類跟加總各算一次、兩邊兜不起來」的風險。myTripTotalTWD 沿用既有的匯率鎖定規則
+        // （expenseNeedsRate 判斷缺匯率就跳過、不偷用 1 頂替），不建立第二套換算公式。
+        const calculateMemberTripCost = (expenseList, memberId) => {
+            const empty = () => ({
+                personalExpensesTotalByCurrency: {},
+                sharedShareTotalByCurrency: {},
+                reimbursementRelatedTotalByCurrency: {},
+                myTripTotalByCurrency: {},
+                myTripTotalTWD: 0,
+                visibleExpensesForCurrentMember: [],
+            });
+            if (!memberId) return empty();
+            const result = empty();
+            (expenseList || []).forEach(e => {
+                if (!expenseVisibleToMember(e, memberId)) return;
+                result.visibleExpensesForCurrentMember.push(e);
+                const myShare = expenseMemberShares(e)[memberId] || 0;
+                if (!myShare) return;
+                const kind = expenseKind(e);
+                const cur = e.currency || setup.value.currency || 'USD';
+                const bucket = kind === 'personal' ? result.personalExpensesTotalByCurrency
+                    : kind === 'shared' ? result.sharedShareTotalByCurrency
+                    : result.reimbursementRelatedTotalByCurrency;
+                bucket[cur] = (bucket[cur] || 0) + myShare;
+                result.myTripTotalByCurrency[cur] = (result.myTripTotalByCurrency[cur] || 0) + myShare;
+                if (!expenseNeedsRate(e)) {
+                    const rate = (e.currency || 'TWD') === 'TWD' ? 1 : Number(e.exchangeRateToTWD);
+                    result.myTripTotalTWD += myShare * rate;
+                }
+            });
+            return result;
+        };
+        const emptyMemberTripCost = () => ({
+            personalExpensesTotalByCurrency: {}, sharedShareTotalByCurrency: {}, reimbursementRelatedTotalByCurrency: {},
+            myTripTotalByCurrency: {}, myTripTotalTWD: 0, visibleExpensesForCurrentMember: [],
+        });
+        const myTripCost = computed(() => {
+            try {
+                return calculateMemberTripCost(activeExpenses.value, currentMemberId.value);
+            } catch (err) {
+                reportMoneyViewError('myTripCost', err);
+                return emptyMemberTripCost();
+            }
+        });
+        // 主卡片的「原始幣別明細」清單：base currency 一定排第一位，跟 usedCurrencies 的排序邏輯一致，
+        // 只是幣別來源換成「我自己的」myTripTotalByCurrency，而不是全員總額。
+        const myTripTotalByCurrencyList = computed(() => {
+            try {
+                const base = setup.value.currency || 'USD';
+                const totals = myTripCost.value.myTripTotalByCurrency || {};
+                const currencies = new Set(Object.keys(totals));
+                currencies.add(base);
+                const ordered = [base, ...Array.from(currencies).filter(c => c !== base).sort()];
+                return ordered.filter(c => totals[c]).map(c => ({ currency: c, total: totals[c] || 0 }));
+            } catch (err) {
+                reportMoneyViewError('myTripTotalByCurrencyList', err);
+                return [];
+            }
+        });
+        // 主卡片的「約合 base currency」次要參考：跟 secondaryReferenceRate 用同一份鎖定匯率，只是套用在
+        // 「我自己的」台幣總額上，不是全員總額——維持同一套匯率規則，不另外造第二套換算公式。
+        const mySecondaryReferenceTotal = computed(() => {
+            try {
+                const rate = secondaryReferenceRate.value;
+                return rate > 0 ? myTripCost.value.myTripTotalTWD / rate : null;
+            } catch (err) {
+                reportMoneyViewError('mySecondaryReferenceTotal', err);
+                return null;
+            }
+        });
         const mapProviderLabel = computed(() => { const map = { 'google': 'Google Maps', 'naver': 'Naver Map', 'amap': '高德地圖' }; return map[setup.value.mapProvider] || '地圖'; });
 
         const weatherDisplay = computed(() => {
@@ -278,7 +916,9 @@ createApp({
         // datetime-local 值固定是 "YYYY-MM-DDTHH:mm"，直接切片取時間/日期即可，不需要額外解析
         const formatFlightTime = (dt) => dt ? dt.slice(11, 16) : '--:--';
         const isNextDayArrival = (dep, arr) => !!(dep && arr && dep.slice(0, 10) !== arr.slice(0, 10));
-        // 簡單轉機時間計算：兩個 datetime-local 字串直接相減；資料不全或算出負值就不顯示，改讓使用者自己寫在 notes
+        // 簡單轉機時間計算：兩個 datetime-local 字串直接相減。刻意不做時區轉換——MVP 直接用使用者輸入的
+        // 機場當地時間相減（見需求 A 第 6 點），跨日期線的航班（例如去程 BR8 TPE→SFO 當地時間反而變早）
+        // 只要兩段時間都是同一套「使用者輸入的當地時間」就還是能算對，不需要額外處理。
         const formatLayover = (arrPrev, depNext) => {
             if (!arrPrev || !depNext) return '';
             const a = new Date(arrPrev), b = new Date(depNext);
@@ -286,8 +926,11 @@ createApp({
             const diffMin = Math.round((b - a) / 60000);
             if (diffMin <= 0) return '';
             const h = Math.floor(diffMin / 60), m = diffMin % 60;
-            return `轉機 ${h > 0 ? h + ' 小時 ' : ''}${m} 分鐘`;
+            return `轉機 ${h > 0 ? h + ' 小時 ' : ''}${String(m).padStart(2, '0')} 分鐘`;
         };
+        // 只要存在下一段（idx < length-1），一律顯示點什麼：算得出來就顯示時間，資料不足（TBD／缺欄位）
+        // 就顯示「轉機時間待補」，不要整條隱藏消失讓人以為沒有轉機或誤以為漏填。
+        const layoverLabel = (arrPrev, depNext) => formatLayover(arrPrev, depNext) || '轉機時間待補';
         // 確認碼預設遮蔽：裝置本地、不落 Firestore，每次重新整理都會重新蓋住
         const revealedFlightConfirmations = reactive({});
         const toggleFlightConfirmation = (segId) => { revealedFlightConfirmations[segId] = !revealedFlightConfirmations[segId]; };
@@ -327,6 +970,375 @@ createApp({
             }];
         };
         const getDotColor = (t) => { if (t === 'food') return 'bg-orange-400 border-orange-100 ring-2 ring-orange-50'; if (t === 'shop') return 'bg-pink-400 border-pink-100 ring-2 ring-pink-50'; if (t === 'transport' || t === 'flight') return 'bg-blue-500 border-blue-100 ring-2 ring-blue-50'; if (t === 'hotel') return 'bg-indigo-400 border-indigo-100 ring-2 ring-indigo-50'; if (t === 'conference') return 'bg-violet-500 border-violet-100 ring-2 ring-violet-50'; return 'bg-primary-500 border-primary-100 ring-2 ring-primary-50'; };
+        const ITEM_TYPE_LABELS = { spot: '景點', food: '餐廳', shop: '購物', transport: '交通', hotel: '飯店', conference: '會議' };
+        const itemTypeLabel = (t) => ITEM_TYPE_LABELS[t] || '景點';
+
+        // ---- 匯入行程文字（同伴 AI 產生的純文字行程，貼上後解析成 itinerary items 或航班 booking）--------------
+        // 刻意不追求完美解析：AI 產生的格式五花八門，這裡只抓最常見的骨架（日期標題 / 條列 / 時間開頭 / 航班段），
+        // 抓不到的欄位（例如 notes）留空讓使用者自己在既有的編輯彈窗補，不在這裡硬做語意分析。
+        // 航班文字（有航班號＋機場代碼＋時間）會整批分流出去，走 booking type:'flight'（跟航班資訊卡片同一份資料），
+        // 不會混進每日 timeline 的一般 itinerary items——這是這次修改的重點，之前誤把航班行拆成一般行程。
+        const TEXT_IMPORT_DATE_SEP = '[|｜:：,、\\-]';
+        const DATE_HEADER_FULL_RE = new RegExp(`^(?:day\\s*\\d+\\s*${TEXT_IMPORT_DATE_SEP}\\s*)?(\\d{4})[\\/\\-](\\d{1,2})[\\/\\-](\\d{1,2})\\s*(?:[\\(（][^\\)）]*[\\)）])?\\s*[:：]?\\s*$`, 'i');
+        const DATE_HEADER_SHORT_RE = new RegExp(`^(?:day\\s*\\d+\\s*${TEXT_IMPORT_DATE_SEP}\\s*)?(\\d{1,2})[\\/\\-](\\d{1,2})\\s*(?:[\\(（][^\\)）]*[\\)）])?\\s*[:：]?\\s*$`, 'i');
+        const TEXT_IMPORT_TIME_RE = /^(\d{1,2}:\d{2})\s*[:：\-]?\s*/;
+        const stripImportBullet = (line) => line.replace(/^\s*(?:[-•*▪‣]|\d+[.\)、])\s*/, '').trim();
+        const TEXT_IMPORT_TYPE_RULES = [
+            { type: 'hotel', re: /hotel|飯店|旅館|inn\b|resort|check-?in|check-?out|入住|退房/i },
+            { type: 'food', re: /早餐|午餐|晚餐|晚宴|brunch|breakfast|lunch|dinner|餐廳|restaurant|café|cafe|咖啡|甜點|dessert|美食/i },
+            { type: 'conference', re: /會議|研討會|session|keynote|poster|conference|symposium|workshop|panel|演講|報告|摘要|abstract|報到|registration/i },
+            { type: 'shop', re: /購物|shopping|outlet|市集|market|mall|超市|supermarket|藥妝|藥局/i },
+            { type: 'transport', re: /機場|airport|抵達|出發|前往|departure|arrival|flight|航班|transfer|接送|taxi|uber|巴士|\bbus\b|地鐵|捷運|火車|train|渡輪|ferry|租車|rental car|開車|arrive|depart/i },
+        ];
+        const detectImportItemType = (text) => { for (const rule of TEXT_IMPORT_TYPE_RULES) { if (rule.re.test(text)) return rule.type; } return 'spot'; };
+
+        // ---- 航班文字偵測與解析 --------------------------------------------------------------------------
+        // 支援兩種格式：
+        // (1) 單行式：「BR08｜TPE 10:15 → SFO 06:35」，航班號＋兩個機場＋兩個時間＋箭頭全部在同一行。
+        // (2) 多行式（同伴 AI 更常見的寫法）：航班號(＋航空公司)一行、出發機場(＋Terminal)+時間一行、
+        //     抵達機場(＋Terminal)+時間一行，三行一組；前面可以有一行「日期 + 去程/回程 + 航線」當標題，
+        //     例如「2026/10/14 去程 Taipei to San Diego」或「去程｜Taipei → San Diego」。
+        // 判斷「這一行是不是航班的一部分」用很窄的形狀比對（航班號／機場代碼＋時間／Terminal／去程回程標題／轉機備註）；
+        // 一旦判斷進了航班區塊，裡面的行完全不會再拿去跑一般行程解析——就算某一段解析不完整，也只標記「無法完整解析」
+        // 顯示提示，不會把航班的殘骸行（例如「BR08 EVA Air」）當成一般行程塞進 timeline（這是這次要修的問題）。
+        const OLD_FLIGHT_SEGMENT_RE = /^([A-Za-z]{2,3})\s?(\d{1,4})\s*[|｜:：\-]?\s*([A-Za-z]{3})\s+(\d{1,2}:\d{2})\s*(?:→|->|-|to)\s*([A-Za-z]{3})\s+(\d{1,2}:\d{2})\s*(\+1)?\s*$/i;
+        const FLIGHT_HEADER_RE = new RegExp(
+            `^(?:(\\d{4}[\\/\\-]\\d{1,2}[\\/\\-]\\d{1,2}|\\d{1,2}[\\/\\-]\\d{1,2})\\s*)?` +
+            `[\\(（]?\\s*(去程|回程|outbound|inbound|departure|return)\\s*[\\)）]?` +
+            `\\s*(?:[|｜:：\\-]?\\s*(.*))?$`, 'i'
+        );
+        // 機場／時間行：支援「機場代碼 [Terminal X] [日期] 時間 [+1] [出發|抵達]」各種排列組合的其中一部分同時出現，
+        // 日期可有可無（沒有就交給 finalizeJourney 用 header 日期或前一段的抵達日期往下推）；
+        // Terminal 關鍵字中英文都收（Terminal / 航廈 / Term.）；出發/抵達只是辨識用，不影響誰是出發誰是抵達
+        // （順序固定：一組航段裡先出現的算出發，後出現的算抵達，跟三種範例格式一致）。
+        const FLIGHT_AIRPORT_TIME_RE = /^([A-Za-z]{3})\s*(?:(?:terminal|航廈|term\.?)\s*(\S+?),?)?\s*(?:(\d{4}[\/\-]\d{1,2}[\/\-]\d{1,2}|\d{1,2}[\/\-]\d{1,2})\s+)?(\d{1,2}:\d{2})\s*(\+1)?\s*(?:出發|抵達|departure|arrival|dep\.?|arr\.?)?\s*$/i;
+        // 航班號行：「AS453」或「AS453 Alaska Airlines」都吃，後面那段文字（如果有）當航空公司名稱；
+        // 沒有文字的話（格式 C：航班號自己一行）就留白，交給下一行「純航空公司名稱」的行去補（見 parseImportText），
+        // 兩者都沒有的話最後在組裝航段時用 AIRLINE_CODE_NAMES 依代碼猜一個
+        const FLIGHT_NUMBER_LINE_RE = /^([A-Za-z]{2,3})\s?(\d{1,4})\s*(.*)$/;
+        // 單獨一行的航空公司名稱（格式 C）：只允許中英文字母/空白/常見標點，不含數字，避免誤吃機場時間行或航班號行
+        const AIRLINE_NAME_LINE_RE = /^[A-Za-z一-鿿][A-Za-z一-鿿\s.\-]{1,40}$/;
+        const FLIGHT_LAYOVER_NOTE_RE = /^(轉機|layover|transfer|停留)/i;
+        const AIRLINE_CODE_NAMES = {
+            BR: 'EVA Air', AS: 'Alaska Airlines', CI: 'China Airlines', CX: 'Cathay Pacific',
+            UA: 'United Airlines', DL: 'Delta Air Lines', AA: 'American Airlines', BA: 'British Airways',
+            JL: 'Japan Airlines', NH: 'ANA', KE: 'Korean Air', OZ: 'Asiana Airlines', SQ: 'Singapore Airlines',
+        };
+        const normalizeDateToken = (token, yearCtx) => {
+            if (!token) return '';
+            const parts = token.split(/[\/\-]/).map(s => s.trim());
+            if (parts.length === 3) return `${parts[0]}-${parts[1].padStart(2, '0')}-${parts[2].padStart(2, '0')}`;
+            if (parts.length === 2) return `${yearCtx}-${parts[0].padStart(2, '0')}-${parts[1].padStart(2, '0')}`;
+            return '';
+        };
+        const inferJourneyDirection = (keyword) => {
+            if (/去程|outbound|departure/i.test(keyword)) return 'outbound';
+            if (/回程|inbound|return/i.test(keyword)) return 'inbound';
+            return 'custom';
+        };
+        // 判斷單一行屬於航班的哪一種子形狀；不符合任何一種就回傳 kind: null（表示這行跟航班無關）
+        const classifyFlightSubLine = (line) => {
+            let m = line.match(OLD_FLIGHT_SEGMENT_RE);
+            if (m) {
+                const airlineCode = m[1].toUpperCase();
+                return {
+                    kind: 'oldsegment', data: {
+                        airline: AIRLINE_CODE_NAMES[airlineCode] || '', flightNumber: `${airlineCode}${m[2]}`,
+                        departureAirport: m[3].toUpperCase(), departureTerminal: '', departureTime: m[4], departureDateRaw: '',
+                        arrivalAirport: m[5].toUpperCase(), arrivalTerminal: '', arrivalTime: m[6], arrivalDateRaw: '',
+                        arrivalPlusOne: !!m[7],
+                    }
+                };
+            }
+            if (FLIGHT_LAYOVER_NOTE_RE.test(line)) return { kind: 'layover' };
+            m = line.match(FLIGHT_HEADER_RE);
+            if (m) {
+                const keyword = m[2];
+                const rest = (m[3] || '').trim();
+                const direction = inferJourneyDirection(keyword);
+                const directionLabel = direction === 'outbound' ? '去程' : direction === 'inbound' ? '回程' : keyword;
+                return { kind: 'header', data: { rawDate: m[1] || '', direction, journeyName: rest ? `${directionLabel}｜${rest}` : directionLabel } };
+            }
+            m = line.match(FLIGHT_AIRPORT_TIME_RE);
+            if (m) return { kind: 'airporttime', data: { airport: m[1].toUpperCase(), terminal: m[2] || '', date: m[3] || '', time: m[4], plusOne: !!m[5] } };
+            m = line.match(FLIGHT_NUMBER_LINE_RE);
+            if (m) {
+                const code = m[1].toUpperCase();
+                // 航空公司優先順序：這一行自己帶的文字（格式 A/B）> 之後單獨一行的航空公司名稱（格式 C，見 parseImportText）
+                // > 都沒有的話留白，最後組裝航段時才用 AIRLINE_CODE_NAMES 依代碼猜——刻意延後猜測，
+                // 這樣格式 C 裡緊接著的「Alaska Airlines」這種單獨一行才有機會蓋掉猜測，而不是被略過。
+                return { kind: 'flightnum', data: { flightNumber: `${code}${m[2]}`, airlineCode: code, airline: (m[3] || '').trim() } };
+            }
+            return { kind: null };
+        };
+        // 這一行本身像不像「一般行程」（日期標題／時間開頭／條列項目）：用來判斷航班區塊該不該在這一行結束
+        const looksLikeItineraryLine = (line) => DATE_HEADER_FULL_RE.test(line) || DATE_HEADER_SHORT_RE.test(line)
+            || TEXT_IMPORT_TIME_RE.test(line) || /^\s*(?:[-•*▪‣]|\d+[.\)、])\s*\S/.test(line);
+
+        // 單一函式同時處理「一般行程」跟「航班」兩種內容，逐行掃描、依當下狀態分流（需求：同一段貼上文字可以混著寫）。
+        // 航班區塊用一個小狀態機組裝：header 開新的 journey；flightnum 開一個新航段等機場/時間；
+        // airporttime 依序當成該航段的出發／抵達；layover 直接忽略；轉機區塊裡任何看不懂、且不像一般行程的行，
+        // 標記 malformed 但不外流成一般行程；只有真的像一般行程的行（日期標題/時間開頭/條列）才會結束航班區塊。
+        const parseImportText = (rawText) => {
+            const lines = rawText.split(/\r?\n/).map(l => l.trim());
+            const tripStart = setup.value.startDate || '';
+            const tripEnd = tripStart ? shiftDateStr(tripStart, (Number(setup.value.days) || 1) - 1) : '';
+            let yearCtx = tripStart.split('-')[0] || String(new Date().getFullYear());
+            let currentDateISO = null;
+            let journey = null;
+            const flightJourneys = [];
+            const flightParseWarnings = [];
+            const itineraryRows = [];
+
+            const startJourney = (headerData = null) => ({
+                journeyName: headerData ? headerData.journeyName : '',
+                direction: headerData ? headerData.direction : 'custom',
+                headerDate: headerData ? normalizeDateToken(headerData.rawDate, yearCtx) : '',
+                contextDate: currentDateISO,
+                segments: [], pendingFlightNum: null, pendingDeparture: null, malformed: false,
+            });
+            // 組裝航段的日期：優先用該行自己寫的日期（departureDateRaw/arrivalDateRaw），沒寫的話：
+            // - 出發日期 fallback 用「目前推進到的日期」（header 日期，或上一段抵達日期），不需要特別提示——
+            //   這是使用者本來就沒打算每段都重複寫日期的正常寫法（需求 3）。
+            // - 抵達日期 fallback：有寫 +1 就用出發日期加一天；否則沒有任何線索，才用出發日期頂著，
+            //   並在 segmentNotes 記一筆「Arrival date inferred; please verify.」讓使用者自己核對（需求 4），
+            //   不會因為抓不到抵達日期就整段丟棄或讓匯入失敗。
+            const finalizeJourney = () => {
+                if (!journey) return;
+                if (journey.pendingFlightNum) journey.malformed = true; // 有航班號但沒配到完整的兩段機場/時間
+                if (!journey.segments.length) {
+                    flightParseWarnings.push('偵測到航班資訊，但無法完整解析。請改用航班新增表單或調整格式。');
+                    journey = null;
+                    return;
+                }
+                const anchor = journey.headerDate || journey.contextDate || (journey.direction === 'outbound' ? tripStart : journey.direction === 'inbound' ? tripEnd : '') || '';
+                let runningDate = anchor;
+                let dateInferred = false;
+                const segments = journey.segments.map(raw => {
+                    const departureDate = raw.departureDateRaw ? normalizeDateToken(raw.departureDateRaw, yearCtx) : (runningDate || '');
+                    let arrivalDate = raw.arrivalDateRaw ? normalizeDateToken(raw.arrivalDateRaw, yearCtx) : '';
+                    let segmentNotes = '';
+                    if (!arrivalDate) {
+                        if (raw.arrivalPlusOne && departureDate) {
+                            arrivalDate = shiftDateStr(departureDate, 1);
+                        } else if (raw.arrivalTime && departureDate) {
+                            arrivalDate = departureDate;
+                            segmentNotes = 'Arrival date inferred; please verify.';
+                            dateInferred = true;
+                        }
+                    }
+                    runningDate = arrivalDate || departureDate || runningDate;
+                    return {
+                        id: generateId(),
+                        airline: raw.airline || AIRLINE_CODE_NAMES[raw.airlineCode] || '',
+                        flightNumber: raw.flightNumber,
+                        departureAirport: raw.departureAirport, arrivalAirport: raw.arrivalAirport,
+                        departureDate, departureTime: raw.departureTime, arrivalDate, arrivalTime: raw.arrivalTime,
+                        departureTerminal: raw.departureTerminal || '', arrivalTerminal: raw.arrivalTerminal || '', segmentNotes,
+                    };
+                });
+                const journeyName = journey.journeyName || `${segments[0].departureAirport} → ${segments[segments.length - 1].arrivalAirport}`;
+                flightJourneys.push({ _journeyId: generateId(), journeyName, direction: journey.direction, segments, incomplete: journey.malformed, dateInferred });
+                // 航班解析成功後，把「目前日期」推進到最後一段抵達的那天：使用者常常直接接著寫當天的行程
+                // （例如落地當天的「16:00 La Jolla Cove」），沒有另外重覆一次日期標題，讓後面沒寫日期的行程行能掛對天
+                const lastArrivalDate = segments[segments.length - 1].arrivalDate;
+                if (lastArrivalDate) currentDateISO = lastArrivalDate;
+                journey = null;
+            };
+
+            for (let i = 0; i < lines.length; i++) {
+                const line = lines[i];
+                if (!line) continue;
+
+                const cls = classifyFlightSubLine(line);
+                if (cls.kind === 'header') { finalizeJourney(); journey = startJourney(cls.data); continue; }
+                if (cls.kind === 'oldsegment') { if (!journey) journey = startJourney(); journey.segments.push(cls.data); continue; }
+                if (cls.kind === 'layover') continue;
+                if (cls.kind === 'flightnum') {
+                    if (!journey) journey = startJourney();
+                    if (journey.pendingFlightNum) journey.malformed = true; // 上一個航班號還沒配到完整段落又來一個新的
+                    journey.pendingFlightNum = cls.data; journey.pendingDeparture = null;
+                    continue;
+                }
+                // 格式 C：航班號跟航空公司名稱分開兩行（「AS453」下一行「Alaska Airlines」）。只在「剛看到一個
+                // 還沒帶航空公司名稱的航班號、還沒開始配機場/時間」這個窄窗口內才把整行文字當航空公司名稱，
+                // 避免誤吃其他一般文字；符合條件但不像航空公司名稱的行，交給下面正常流程判斷。
+                if (journey && journey.pendingFlightNum && !journey.pendingFlightNum.airline && !journey.pendingDeparture
+                    && cls.kind === null && AIRLINE_NAME_LINE_RE.test(line)) {
+                    journey.pendingFlightNum.airline = line.trim();
+                    continue;
+                }
+                if (cls.kind === 'airporttime') {
+                    if (!journey || !journey.pendingFlightNum) { if (journey) journey.malformed = true; continue; }
+                    if (!journey.pendingDeparture) { journey.pendingDeparture = cls.data; }
+                    else {
+                        journey.segments.push({
+                            flightNumber: journey.pendingFlightNum.flightNumber,
+                            airline: journey.pendingFlightNum.airline || AIRLINE_CODE_NAMES[journey.pendingFlightNum.airlineCode] || '',
+                            departureAirport: journey.pendingDeparture.airport, departureTerminal: journey.pendingDeparture.terminal,
+                            departureTime: journey.pendingDeparture.time, departureDateRaw: journey.pendingDeparture.date,
+                            arrivalAirport: cls.data.airport, arrivalTerminal: cls.data.terminal,
+                            arrivalTime: cls.data.time, arrivalDateRaw: cls.data.date, arrivalPlusOne: cls.data.plusOne,
+                        });
+                        journey.pendingFlightNum = null; journey.pendingDeparture = null;
+                    }
+                    continue;
+                }
+
+                // 這一行不符合任何航班子形狀
+                if (journey && !looksLikeItineraryLine(line)) { journey.malformed = true; continue; }
+                finalizeJourney(); // 看起來是一般行程了（或本來就沒有正在組的 journey），結束航班區塊
+
+                let m = line.match(DATE_HEADER_FULL_RE);
+                if (m) { yearCtx = m[1]; currentDateISO = `${m[1]}-${m[2].padStart(2, '0')}-${m[3].padStart(2, '0')}`; continue; }
+                m = line.match(DATE_HEADER_SHORT_RE);
+                if (m) { currentDateISO = `${yearCtx}-${m[1].padStart(2, '0')}-${m[2].padStart(2, '0')}`; continue; }
+                const stripped = stripImportBullet(line);
+                if (!stripped) continue;
+                let time = '', rest = stripped;
+                const tm = stripped.match(TEXT_IMPORT_TIME_RE);
+                if (tm) {
+                    const [h, mi] = tm[1].split(':');
+                    time = `${h.padStart(2, '0')}:${mi}`;
+                    rest = stripped.slice(tm[0].length).trim();
+                }
+                const title = (rest || stripped).trim();
+                if (!title) continue;
+                itineraryRows.push({ _rowId: generateId(), date: currentDateISO, time, title, type: detectImportItemType(line), note: '' });
+            }
+            finalizeJourney();
+            return { itineraryRows, flightJourneys, flightParseWarnings };
+        };
+        // 把解析結果對到目前旅程的 days（依 fullDate 找天），標出「日期不在旅程範圍」跟「同天同時間同標題已存在」，
+        // 兩者都預設不勾選匯入——前者沒有可以掛的一天，後者讓使用者自己決定要不要仍然重複匯入
+        const buildImportPreview = (rows) => rows.map(r => {
+            const dayIdx = r.date ? days.value.findIndex(d => d.fullDate === r.date) : -1;
+            const outOfRange = dayIdx === -1;
+            const duplicate = !outOfRange && (days.value[dayIdx].items || []).some(i => (i.time || '') === (r.time || '') && (i.activity || '').trim() === r.title.trim());
+            return {
+                ...r, dayIdx, outOfRange, duplicate,
+                dayLabel: outOfRange ? (r.date || '未偵測到日期') : `Day ${dayIdx + 1}｜${days.value[dayIdx].shortDate || days.value[dayIdx].date}`,
+                include: !outOfRange && !duplicate,
+            };
+        });
+        // 重複判斷：同一個 trip 的 bookings 裡，任何 flight booking 的任何一段有相同 flightNumber + departureDate + departureTime
+        const flightSegmentExists = (seg) => bookings.value.some(b => b.type === 'flight' && (b.segments || []).some(s =>
+            (s.flightNumber || '').replace(/\s+/g, '').toUpperCase() === (seg.flightNumber || '').replace(/\s+/g, '').toUpperCase()
+            && s.departureDate === seg.departureDate && s.departureTime === seg.departureTime
+        ));
+        const buildFlightImportPreview = (journeys) => journeys.map(j => {
+            const duplicate = j.segments.some(flightSegmentExists);
+            return { ...j, duplicate, include: !duplicate };
+        });
+        const textImportModal = reactive({ show: false, step: 'paste', text: '', items: [], flightJourneys: [], flightParseWarnings: [] });
+        const lastImportBatch = ref(null);
+        const openTextImportModal = () => {
+            textImportModal.step = 'paste'; textImportModal.text = ''; textImportModal.items = [];
+            textImportModal.flightJourneys = []; textImportModal.flightParseWarnings = [];
+            textImportModal.show = true;
+        };
+        const closeTextImportModal = () => { textImportModal.show = false; };
+        const backToPasteStep = () => { textImportModal.step = 'paste'; };
+        // 給使用者複製去餵給自己的 AI（ChatGPT/Claude…）的提示詞：把上面那段「跟人類解釋解析規則」的說明
+        // 改寫成「跟 AI 下指令」的格式，讓 AI 生成的文字本身就長得像這個匯入器看得懂的樣子
+        // （日期標題／條列／時間開頭／航班段），不用使用者自己事後對照規則手動調格式。
+        const TEXT_IMPORT_PROMPT = `請生成可匯入旅遊 App 的 .txt 純文字行程：日期一行、行程逐行列出、包含時間與地點，不要表格。
+
+格式規則：
+- 每天的行程用一行日期標題開頭，例如 2026/10/14、10/14、或 Day 1｜10/14。
+- 行程項目逐行列出，每行開頭是時間（例如 09:00），接著是地點與活動說明；沒有明確時間的項目也可以，直接寫地點與說明。
+- 可以用 -、•、1. 等條列符號開頭，也可以不用。
+- 航班請另外獨立列成一段，不要跟每日行程混在一起：可以用單行格式（例如 BR08｜TPE 10:15 → SFO 06:35），也可以把航班號／航空公司、出發機場＋時間、抵達機場＋時間分開寫成多行。
+- 不要用表格、不要用 Markdown 語法（例如 |---|---| 或 **粗體**），純文字就好。`;
+        const copyTextImportPrompt = async () => {
+            try {
+                await navigator.clipboard.writeText(TEXT_IMPORT_PROMPT);
+                showToast('提示詞已複製，貼給你的 AI 就能產生行程文字', { icon: 'ph-bold ph-clipboard-text' });
+            } catch (e) {
+                appConfirm('自動複製失敗，請長按下方文字手動複製：', { title: '匯入提示詞', link: TEXT_IMPORT_PROMPT, showCancel: false, confirmText: '關閉' });
+            }
+        };
+        const previewTextImport = () => {
+            const text = textImportModal.text.trim();
+            if (!text) { showToast('請先貼上行程文字', { icon: 'ph-bold ph-warning' }); return; }
+            const { itineraryRows, flightJourneys, flightParseWarnings } = parseImportText(text);
+            if (!itineraryRows.length && !flightJourneys.length && !flightParseWarnings.length) { showToast('無法辨識任何行程或航班內容，請確認格式', { icon: 'ph-bold ph-warning' }); return; }
+            textImportModal.items = buildImportPreview(itineraryRows);
+            textImportModal.flightJourneys = buildFlightImportPreview(flightJourneys);
+            textImportModal.flightParseWarnings = flightParseWarnings;
+            textImportModal.step = 'preview';
+        };
+        const toggleAllImportRows = () => {
+            const importable = textImportModal.items.filter(i => !i.outOfRange);
+            const allChecked = importable.every(i => i.include);
+            importable.forEach(i => { i.include = !allChecked; });
+        };
+        const toggleAllFlightJourneys = () => {
+            const allChecked = textImportModal.flightJourneys.every(j => j.include);
+            textImportModal.flightJourneys.forEach(j => { j.include = !allChecked; });
+        };
+        // 只新增，不覆蓋、不刪除既有資料；每筆都標上 source/importedAt/importBatchId，方便日後辨識或撤回。
+        // 航班一律走 createBookingDraftForType('flight', ...) 補齊完整欄位（含記帳/同步用的欄位）；
+        // syncToItinerary 開啟（對 flight 來說意思是「投影到航班資訊卡片」，不是建立一般 timeline item，
+        // 見 syncFlightBookingToFlightInfo），這樣文字匯入的航班會直接出現在航班資訊，不用使用者手動再勾一次。
+        // syncToExpense 維持關閉（工廠預設 false），避免匯入就無中生有一筆記帳金額。
+        const confirmTextImport = () => {
+            const toImportItems = textImportModal.items.filter(i => i.include && i.dayIdx !== -1);
+            const toImportFlights = textImportModal.flightJourneys.filter(j => j.include);
+            if (!toImportItems.length && !toImportFlights.length) { showToast('沒有勾選任何要匯入的項目', { icon: 'ph-bold ph-warning' }); return; }
+            const batchId = generateId();
+            const importedAt = new Date().toISOString();
+
+            const touchedDayIdx = new Set();
+            toImportItems.forEach(row => {
+                const day = days.value[row.dayIdx];
+                day.items.push({
+                    id: generateId(), time: row.time || '', type: row.type, activity: row.title,
+                    location: '', link: '', note: row.note || '',
+                    source: 'text-import', importedAt, importBatchId: batchId,
+                });
+                touchedDayIdx.add(row.dayIdx);
+            });
+            touchedDayIdx.forEach(idx => sortItemsByTime(days.value[idx].items));
+
+            toImportFlights.forEach(j => {
+                const draft = createBookingDraftForType('flight', { journeyName: j.journeyName, segments: j.segments, syncToItinerary: true });
+                draft.direction = j.direction;
+                draft.source = 'text-import'; draft.importedAt = importedAt; draft.importBatchId = batchId;
+                bookings.value.push(draft);
+                syncFlightBookingToFlightInfo(draft);
+            });
+
+            lastImportBatch.value = { id: batchId, itemCount: toImportItems.length, flightCount: toImportFlights.length, at: importedAt };
+            textImportModal.show = false;
+            const parts = [];
+            if (toImportItems.length) parts.push(`${toImportItems.length} 筆行程`);
+            if (toImportFlights.length) parts.push(`${toImportFlights.length} 筆航班`);
+            showToast(`已匯入${parts.join('、')}`, { icon: 'ph-bold ph-check-circle' });
+        };
+        // 單層復原（不是完整的復原堆疊）：撤回會移除「所有天」裡 importBatchId 相符的行程項目，以及 bookings 裡相符的航班，
+        // 足夠應付「這批匯錯了」的情境
+        const undoLastImport = async () => {
+            if (!lastImportBatch.value) return;
+            const batchId = lastImportBatch.value.id;
+            const totalCount = (lastImportBatch.value.itemCount || 0) + (lastImportBatch.value.flightCount || 0);
+            const ok = await appConfirm(`確定要撤回上一次匯入的 ${totalCount} 筆內容嗎？（含行程與航班）`, { title: '撤回匯入', confirmText: '撤回', danger: true });
+            if (!ok) return;
+            let removedItems = 0;
+            days.value.forEach(day => {
+                if (!day.items || !day.items.length) return;
+                const before = day.items.length;
+                day.items = day.items.filter(i => i.importBatchId !== batchId);
+                removedItems += before - day.items.length;
+            });
+            const beforeBookingsCount = bookings.value.length;
+            const removedFlightBookings = bookings.value.filter(b => b.importBatchId === batchId && b.type === 'flight');
+            bookings.value = bookings.value.filter(b => b.importBatchId !== batchId);
+            removedFlightBookings.forEach(b => removeGeneratedFlightInfo(b.id));
+            const removedFlights = beforeBookingsCount - bookings.value.length;
+            lastImportBatch.value = null;
+            showToast(`已撤回 ${removedItems} 筆行程、${removedFlights} 筆航班`, { icon: 'ph-bold ph-arrow-counter-clockwise' });
+        };
         const updateParticipants = () => { participants.value = participantsStr.value.split(',').map(s => s.trim()).filter(s => s); };
         const isUrl = (str) => { if (!str) return false; try { new URL(str); return true; } catch { return /^https?:\/\//i.test(str); } };
 
@@ -642,6 +1654,7 @@ createApp({
             }, (error) => {
                 console.error('Expenses listen error', error);
                 syncStatus.value = 'error';
+                showToast(firebaseErrorMessage(error, '無法讀取記帳資料'), { icon: 'ph-bold ph-warning', duration: 5000 });
             });
         };
         // 一次性搬遷：把舊版存在 trip 文件裡的 expenses 陣列，逐筆寫成子集合文件；完成後清掉舊欄位，
@@ -658,13 +1671,27 @@ createApp({
                     if (!old) continue;
                     const payerId = ensureMemberRecord(old.payer);
                     const ref = doc(collection(db, 'trips', tripId, 'expenses'));
+                    const amount = Number(old.amount) || 0;
+                    // 需求 H：這批舊資料沒有任何歷史匯率可考——currency 若不是 TWD，不可以偷偷預設
+                    // exchangeRateToTWD = 1（那就是這次要修的 bug 本身），只能標成「缺匯率」讓使用者事後補齊。
+                    const legacyCurrency = setup.value.currency || 'USD';
+                    const legacyIsTWD = legacyCurrency === 'TWD';
                     await setDoc(ref, {
                         title: old.item || '未命名支出',
-                        amount: Number(old.amount) || 0,
-                        currency: setup.value.currency || 'USD',
+                        category: 'other',
+                        amount,
+                        currency: legacyCurrency,
+                        exchangeRateToTWD: legacyIsTWD ? 1 : null,
+                        exchangeRateFetchedAt: null,
+                        exchangeRateSource: legacyIsTWD ? 'same-currency' : 'manual',
+                        exchangeRateLocked: true,
+                        summaryCurrency: 'TWD',
                         paidByMemberId: payerId,
                         splitAmongMemberIds: members.value.map(m => m.id),
                         splitMethod: 'equal',
+                        customSplits: {},
+                        notes: '',
+                        sourceBookingId: null,
                         createdAt: old.date ? `${old.date}T00:00:00.000Z` : nowIso,
                         createdByMemberId: payerId,
                         updatedAt: nowIso,
@@ -683,22 +1710,45 @@ createApp({
         // 記帳：快速新增保留內聯表單；既有支出點列開彈窗編輯
         const itemInputRef = ref(null);
         const isItemInvalid = ref(false);
+        const isPayerInvalid = ref(false);
+        const isSplitInvalid = ref(false);
+        // 全體結算預設收合：個人視角改版後，「我的總覽」才是記帳頁主要內容，全體結算退居「展開」才看得到的次要區塊
+        const showOverallSettlement = ref(false);
         const addExpense = async () => {
-            if (!newExpense.value.title) { isItemInvalid.value = true; nextTick(() => { itemInputRef.value?.focus(); }); return; }
-            if (!newExpense.value.amount) { isAmountInvalid.value = true; nextTick(() => { amountInputRef.value?.focus(); }); return; }
-            if (!db || !currentTripId.value) return;
-            const payerId = newExpense.value.payerMemberId || currentActorMemberId.value || (activeMembers.value[0]?.id ?? null);
+            isItemInvalid.value = false; isAmountInvalid.value = false; isPayerInvalid.value = false; isSplitInvalid.value = false;
+            if (!newExpense.value.paidByMemberId) newExpense.value.paidByMemberId = currentActorMemberId.value || (activeMembers.value[0]?.id ?? '');
+            const err = validateExpenseDraft(newExpense.value);
+            if (err) {
+                console.error('Add expense validation failed:', err, JSON.parse(JSON.stringify(newExpense.value)));
+                if (err === '請輸入支出名稱') { isItemInvalid.value = true; nextTick(() => { itemInputRef.value?.focus(); }); }
+                else if (err === '請輸入有效金額') { isAmountInvalid.value = true; nextTick(() => { amountInputRef.value?.focus(); }); }
+                else if (err === '請選擇付款者') { isPayerInvalid.value = true; }
+                else if (err === '請至少選擇一位分攤對象') { isSplitInvalid.value = true; }
+                showToast(err, { icon: 'ph-bold ph-warning' });
+                return;
+            }
+            if (!db || !currentTripId.value) { showToast('尚未連線到資料庫，請稍後再試', { icon: 'ph-bold ph-warning' }); return; }
+            const payerId = newExpense.value.paidByMemberId;
+            const amount = Number(newExpense.value.amount) || 0;
             const nowIso = new Date().toISOString();
             const ref = doc(collection(db, 'trips', currentTripId.value, 'expenses'));
+            const rateFields = buildExpenseRateFields(newExpense.value);
+            const splitMethod = newExpense.value.splitMethod || 'equal';
             expenseSyncStatus.value = 'saving';
             try {
                 await setDoc(ref, {
-                    title: newExpense.value.title,
-                    amount: Number(newExpense.value.amount) || 0,
-                    currency: setup.value.currency || 'USD',
+                    title: newExpense.value.title.trim(),
+                    category: newExpense.value.category || 'other',
+                    amount,
+                    currency: newExpense.value.currency || setup.value.currency || 'USD',
+                    ...rateFields,
+                    summaryAmountTWD: amount * (Number(rateFields.exchangeRateToTWD) || 0),
                     paidByMemberId: payerId,
-                    splitAmongMemberIds: members.value.map(m => m.id),
-                    splitMethod: 'equal',
+                    splitAmongMemberIds: splitMethod === 'personal' ? [payerId] : [...newExpense.value.splitAmongMemberIds],
+                    splitMethod,
+                    customSplits: (splitMethod === 'customAmount' || splitMethod === 'customPercent') ? { ...newExpense.value.customSplits } : {},
+                    notes: newExpense.value.notes || '',
+                    sourceBookingId: null,
                     createdAt: nowIso, createdByMemberId: currentActorMemberId.value,
                     updatedAt: nowIso, updatedByMemberId: currentActorMemberId.value,
                     version: 1,
@@ -708,31 +1758,57 @@ createApp({
             } catch (e) {
                 console.error('Add expense failed', e);
                 expenseSyncStatus.value = 'error';
-                showToast('新增支出失敗，請檢查網路後再試', { icon: 'ph-bold ph-warning' });
+                showToast(firebaseErrorMessage(e, '新增支出失敗'), { icon: 'ph-bold ph-warning' });
                 return;
             }
-            newExpense.value.title = ''; newExpense.value.amount = '';
-            isItemInvalid.value = false; isAmountInvalid.value = false;
+            newExpense.value = createExpenseDraft();
+            newExpense.value.paidByMemberId = payerId; // 沿用上一筆的付款人，方便同一人連續記好幾筆
+            applyFetchedRate(newExpense.value); // 重置後的草稿匯率是 null，立刻補一次快照，下一筆才填得進去
         };
 
         // 編輯彈窗：draft 制 + optimistic concurrency——開窗時記下當時讀到的 version（baseVersion），
         // 存檔改用 transaction：先讀一次伺服器上「現在」的 version，跟 baseVersion 不一致就代表旅伴
         // 在我編輯的這段時間內已經存過一次，直接中止交易、回報衝突，不會用我這份（可能過時）的草稿蓋過去。
-        const expModal = reactive({ show: false, targetId: null, draft: null, baseVersion: null, saveStatus: 'idle', conflictWith: null });
+        const expModal = reactive({ show: false, targetId: null, draft: null, baseVersion: null, saveStatus: 'idle', conflictWith: null, errorMsg: '' });
         const openExpModal = (exp) => {
             expModal.targetId = exp.id;
             expModal.draft = JSON.parse(JSON.stringify(exp));
+            // 舊資料（新增多幣別/分類/自訂分攤等欄位之前建立的支出）可能缺欄位，補上預設值，
+            // 避免編輯彈窗的下拉選單顯示空白、或欄位是 undefined。刻意不在這裡呼叫 applyFetchedRate 重新抓匯率——
+            // 這筆支出當初存的匯率是歷史快照，開編輯彈窗只是要看/改內容，不代表要重新核算匯率（需求 B 規則 2）。
+            if (!expModal.draft.category) expModal.draft.category = 'other';
+            if (!expModal.draft.currency) expModal.draft.currency = setup.value.currency || 'USD';
+            // 需求 H：舊資料缺 exchangeRateToTWD 時，TWD 支出本來就是 1，其餘幣別絕對不能偷偷補 1——
+            // 留白讓 expenseNeedsRate/UI 警告顯示出來，逼使用者自己補一個真的匯率再存檔。
+            if (expModal.draft.exchangeRateToTWD == null) expModal.draft.exchangeRateToTWD = expModal.draft.currency === 'TWD' ? 1 : null;
+            if (!expModal.draft.exchangeRateSource) expModal.draft.exchangeRateSource = expModal.draft.currency === 'TWD' ? 'same-currency' : 'manual';
+            if (!expModal.draft.splitMethod) expModal.draft.splitMethod = 'equal';
+            if (!expModal.draft.splitAmongMemberIds || !expModal.draft.splitAmongMemberIds.length) expModal.draft.splitAmongMemberIds = defaultSplitIds();
+            if (!expModal.draft.customSplits) expModal.draft.customSplits = {};
+            if (expModal.draft.notes == null) expModal.draft.notes = '';
             expModal.baseVersion = exp.version || 1;
             expModal.saveStatus = 'idle';
             expModal.conflictWith = null;
+            expModal.errorMsg = '';
             expModal.show = true;
         };
         const saveExpModal = async (force = false) => {
             if (!db || !currentTripId.value || !expModal.targetId || !expModal.draft) { expModal.show = false; return; }
-            const ref = doc(db, 'trips', currentTripId.value, 'expenses', expModal.targetId);
             const draft = expModal.draft;
+            expModal.errorMsg = '';
+            const err = validateExpenseDraft(draft);
+            if (err) {
+                console.error('Save expense validation failed:', err, JSON.parse(JSON.stringify(draft)));
+                expModal.errorMsg = err;
+                showToast(err, { icon: 'ph-bold ph-warning' });
+                return;
+            }
+            const ref = doc(db, 'trips', currentTripId.value, 'expenses', expModal.targetId);
             const baseVersion = expModal.baseVersion;
             const actorId = currentActorMemberId.value;
+            const amount = Number(draft.amount) || 0;
+            const rateFields = buildExpenseRateFields(draft);
+            const splitMethod = draft.splitMethod || 'equal';
             expModal.saveStatus = 'saving';
             try {
                 await runTransaction(db, async (tx) => {
@@ -745,12 +1821,17 @@ createApp({
                         throw err;
                     }
                     tx.update(ref, {
-                        title: draft.title,
-                        amount: Number(draft.amount) || 0,
+                        title: draft.title.trim(),
+                        category: draft.category || 'other',
+                        amount,
                         currency: draft.currency || live.currency || setup.value.currency || 'USD',
+                        ...rateFields,
+                        summaryAmountTWD: amount * (Number(rateFields.exchangeRateToTWD) || 0),
                         paidByMemberId: draft.paidByMemberId,
-                        splitAmongMemberIds: (draft.splitAmongMemberIds && draft.splitAmongMemberIds.length) ? draft.splitAmongMemberIds : live.splitAmongMemberIds,
-                        splitMethod: draft.splitMethod || live.splitMethod || 'equal',
+                        splitAmongMemberIds: splitMethod === 'personal' ? [draft.paidByMemberId] : [...draft.splitAmongMemberIds],
+                        splitMethod,
+                        customSplits: (splitMethod === 'customAmount' || splitMethod === 'customPercent') ? { ...draft.customSplits } : {},
+                        notes: draft.notes || '',
                         updatedAt: new Date().toISOString(),
                         updatedByMemberId: actorId,
                         version: (force ? (live.version || 1) : baseVersion) + 1,
@@ -767,7 +1848,8 @@ createApp({
                 }
                 console.error('Save expense failed', e);
                 expModal.saveStatus = 'error';
-                showToast('儲存失敗，請檢查網路後再試', { icon: 'ph-bold ph-warning' });
+                expModal.errorMsg = firebaseErrorMessage(e, '儲存失敗');
+                showToast(expModal.errorMsg, { icon: 'ph-bold ph-warning' });
             }
         };
         // 衝突發生時的兩個選擇：載入對方最新版本重填草稿，或者確認後強制蓋過去（force:true 略過 version 檢查）
@@ -830,17 +1912,209 @@ createApp({
             departureDate: '', departureTime: '', arrivalDate: '', arrivalTime: '',
             departureTerminal: '', arrivalTerminal: '', segmentNotes: ''
         });
+        // cost/currency/paidByMemberId/syncTo*：需求 B、C、D 共用的欄位，放在 common 讓所有 type（含 flight）都有，
+        // 不用每個 type 各自重複宣告一次。exchangeRateToTWD 只在 currency 不是 TWD 時才需要填。
+        // splitAmongMemberIds/splitMethod/customSplits：同步到記帳前，使用者必須在這裡補齊分攤方式（需求 E），
+        // 否則這筆費用只是存在 booking 上的數字，不會真的進共同結算。
         const createBookingDraftForType = (type, base = {}) => {
-            const common = { id: base.id || generateId(), type, bookedBy: base.bookedBy || '', notes: base.notes || '', confirmationNumber: base.confirmationNumber || '' };
+            const common = {
+                id: base.id || generateId(), type, bookedBy: base.bookedBy || '', notes: base.notes || '', confirmationNumber: base.confirmationNumber || '',
+                cost: base.cost || '', currency: base.currency || setup.value.currency || 'USD',
+                exchangeRateToTWD: base.exchangeRateToTWD || '',
+                exchangeRateFetchedAt: base.exchangeRateFetchedAt || null,
+                exchangeRateSource: base.exchangeRateSource || 'same-currency',
+                paidByMemberId: base.paidByMemberId || '',
+                splitAmongMemberIds: (base.splitAmongMemberIds && base.splitAmongMemberIds.length) ? base.splitAmongMemberIds : defaultSplitIds(),
+                splitMethod: base.splitMethod || 'equal',
+                customSplits: base.customSplits || {},
+                syncToItinerary: !!base.syncToItinerary, syncToExpense: !!base.syncToExpense,
+            };
             if (type === 'hotel') {
-                return { ...common, hotelName: base.hotelName || '', checkInDate: base.checkInDate || '', checkOutDate: base.checkOutDate || '', location: base.location || '', cost: base.cost || '' };
+                return { ...common, hotelName: base.hotelName || '', checkInDate: base.checkInDate || '', checkOutDate: base.checkOutDate || '', location: base.location || '' };
             }
             if (type === 'flight') {
                 return { ...common, journeyName: base.journeyName || '', segments: (base.segments && base.segments.length) ? base.segments : [createBookingFlightSegment()] };
             }
             // restaurant / ticket / other：沿用通用欄位
-            return { ...common, title: base.title || '', date: base.date || '', time: base.time || '', location: base.location || '', cost: base.cost || '' };
+            return { ...common, title: base.title || '', date: base.date || '', time: base.time || '', location: base.location || '' };
         };
+        // ---- 需求 B：Booking → Itinerary 同步 --------------------------------------------------------
+        // 用 sourceBookingId（+ sourceItemKey 區分同一筆 booking 底下的多個項目，例如 hotel 的 check-in/check-out、
+        // flight 的每個 segment）標記「這筆行程項目是哪個 booking 產生的」，不用另外在 booking 上存一份
+        // generatedItineraryItemIds——每次儲存都用「先整批移除舊的、再依目前 draft 內容重新產生」的方式做，
+        // 天生冪等（同一份 booking 存幾次結果都一樣），也天生不會重複：這是刻意的最小修改取捨，
+        // 代價是使用者若手動改過同步產生的那筆行程項目，下次存 booking 會被覆蓋回去。
+        const findItineraryDayIndexByDate = (fullDate) => days.value.findIndex(d => d.fullDate === fullDate);
+        const removeGeneratedItineraryItems = (bookingId) => {
+            days.value.forEach(day => {
+                if (!day.items || !day.items.length) return;
+                day.items = day.items.filter(i => i.sourceBookingId !== bookingId);
+            });
+        };
+        // 依 booking type 決定要展開成哪些行程項目：hotel→check-in/check-out 兩筆、flight→每個 segment 一筆、
+        // restaurant/ticket→各一筆。缺日期的項目（TBD）直接跳過，不會產生「掛不到任何一天」的孤兒項目。
+        const buildDesiredItineraryItemsForBooking = (b) => {
+            if (b.type === 'hotel') {
+                const items = [];
+                if (b.checkInDate) items.push({ key: 'checkin', date: b.checkInDate, time: '', type: 'hotel', activity: `Check-in：${b.hotelName || '飯店'}`, location: b.location || '', note: '確認碼已儲存在訂位頁' });
+                if (b.checkOutDate) items.push({ key: 'checkout', date: b.checkOutDate, time: '', type: 'hotel', activity: `Check-out：${b.hotelName || '飯店'}`, location: b.location || '', note: '確認碼已儲存在訂位頁' });
+                return items;
+            }
+            // flight 不走這裡：航班一律同步到「航班資訊」卡片（見 syncFlightBookingToFlightInfo），
+            // 不會產生一般 itinerary item，否則會同時出現在 timeline 又出現在航班資訊，見需求文件。
+            if (b.type === 'restaurant') {
+                if (!b.date) return [];
+                return [{ key: 'main', date: b.date, time: b.time || '', type: 'food', activity: b.title || '餐廳訂位', location: b.location || '', note: b.confirmationNumber ? '確認碼已儲存在訂位頁' : '' }];
+            }
+            if (b.type === 'ticket') {
+                if (!b.date) return [];
+                return [{ key: 'main', date: b.date, time: b.time || '', type: 'spot', activity: b.title || '票券活動', location: b.location || '', note: b.confirmationNumber ? '確認碼已儲存在訂位頁' : '' }];
+            }
+            return [];
+        };
+        // flight booking 勾選「同步到行程」時，不建立一般 itinerary item，改把航段投影到當天的
+        // 「航班資訊」卡片（day.flight）——跟 day.flight 手動輸入是同一份資料/同一個 UI，只是來源是 booking。
+        // 用 day.flight.sourceBookingId 標記「這張卡片是哪個 booking 產生的」，重存 booking 時整張覆蓋重建（冪等，
+        // 跟 removeGeneratedItineraryItems 同一套取捨）；如果當天已經有「別的來源」的航班卡片（手動建立或另一筆
+        // booking），為了不覆蓋使用者既有資料，直接跳過並提示，而不是硬蓋過去。
+        const removeGeneratedFlightInfo = (bookingId) => {
+            days.value.forEach(day => {
+                if (day.flight && day.flight.sourceBookingId === bookingId) day.flight = null;
+            });
+        };
+        const bookingSegmentToFlightCardSegment = (s, confirmationNumber) => ({
+            id: generateId(), airline: s.airline || '', flightNumber: s.flightNumber || '',
+            departureAirport: s.departureAirport || '', arrivalAirport: s.arrivalAirport || '',
+            departureDateTime: (s.departureDate && s.departureTime) ? `${s.departureDate}T${s.departureTime}` : '',
+            arrivalDateTime: (s.arrivalDate && s.arrivalTime) ? `${s.arrivalDate}T${s.arrivalTime}` : '',
+            departureTerminal: s.departureTerminal || '', arrivalTerminal: s.arrivalTerminal || '',
+            confirmationNumber: confirmationNumber || '', notes: s.segmentNotes || ''
+        });
+        const syncFlightBookingToFlightInfo = (b) => {
+            removeGeneratedFlightInfo(b.id);
+            if (!b.syncToItinerary) return { created: 0, skipped: 0 };
+            const segments = (b.segments || []).filter(s => s.departureDate);
+            if (!segments.length) return { created: 0, skipped: 0 };
+            const dayIdx = findItineraryDayIndexByDate(segments[0].departureDate);
+            if (dayIdx === -1) {
+                showToast('航班日期不在旅程範圍內，未加入航班資訊', { icon: 'ph-bold ph-warning' });
+                return { created: 0, skipped: 1 };
+            }
+            const day = days.value[dayIdx];
+            if (day.flight && day.flight.sourceBookingId !== b.id) {
+                showToast('當天已有航班資訊卡片，未覆蓋；請先手動移除再同步', { icon: 'ph-bold ph-warning' });
+                return { created: 0, skipped: 1 };
+            }
+            day.flight = {
+                id: generateId(), label: b.journeyName || '', sourceBookingId: b.id,
+                segments: segments.map(s => bookingSegmentToFlightCardSegment(s, b.confirmationNumber))
+            };
+            return { created: 1, skipped: 0 };
+        };
+        const syncBookingToItinerary = (b) => {
+            if (b.type === 'flight') return syncFlightBookingToFlightInfo(b);
+            removeGeneratedItineraryItems(b.id);
+            if (!b.syncToItinerary) return { created: 0, skipped: 0 };
+            let created = 0, skipped = 0;
+            buildDesiredItineraryItemsForBooking(b).forEach(d => {
+                const dayIdx = findItineraryDayIndexByDate(d.date);
+                if (dayIdx === -1) { skipped++; return; }
+                days.value[dayIdx].items.push({
+                    id: generateId(), time: d.time || '', type: d.type, activity: d.activity,
+                    location: d.location || '', link: '', note: d.note || '',
+                    sourceBookingId: b.id, sourceItemKey: d.key
+                });
+                sortItemsByTime(days.value[dayIdx].items);
+                created++;
+            });
+            if (skipped) showToast(`${skipped} 筆日期不在旅程範圍內，未加入行程`, { icon: 'ph-bold ph-warning' });
+            return { created, skipped };
+        };
+
+        // ---- 需求 C：Booking → Expense 同步 ----------------------------------------------------------
+        // 用 expense.sourceBookingId 反查「這個 booking 是否已經有對應的 expense」，避免重複新增；
+        // booking cost/currency 改了、且已經有連過的 expense 時，用 appConfirm 問過使用者才更新，不安靜蓋過去。
+        const findExpenseByBookingId = (bookingId) => activeExpenses.value.find(e => e.sourceBookingId === bookingId);
+        const defaultExpenseTitleForBooking = (b) => {
+            if (b.type === 'hotel') return `Hotel - ${b.hotelName || '未命名飯店'}`;
+            if (b.type === 'flight') return `Flight - ${b.journeyName || '未命名航程'}`;
+            if (b.type === 'restaurant') return `Restaurant - ${b.title || '未命名餐廳'}`;
+            if (b.type === 'ticket') return `Ticket - ${b.title || '未命名票券'}`;
+            return b.title || '訂位費用';
+        };
+        // booking type → expense category 的對應：讓同步過去的支出一樣能照分類看報表，不會全部落在「其他」
+        const bookingCategoryForType = (type) => ({ hotel: 'lodging', flight: 'transport', restaurant: 'food', ticket: 'ticket' }[type] || 'other');
+        const syncBookingToExpense = async (b) => {
+            if (!db || !currentTripId.value) return;
+            const existing = findExpenseByBookingId(b.id);
+            const cost = Number(b.cost);
+            if (!b.syncToExpense || !cost) {
+                // 使用者取消同步，或把費用清空了：如果之前同步過，軟刪除那筆自動建立的 expense，避免留下孤兒支出
+                if (existing) {
+                    try {
+                        const ref = doc(db, 'trips', currentTripId.value, 'expenses', existing.id);
+                        await setDoc(ref, { deleted: true, deletedAt: new Date().toISOString(), deletedByMemberId: currentActorMemberId.value, updatedAt: new Date().toISOString(), version: (existing.version || 1) + 1 }, { merge: true });
+                    } catch (e) {
+                        console.error('Remove synced expense failed', e);
+                        showToast(firebaseErrorMessage(e, '移除記帳同步失敗'), { icon: 'ph-bold ph-warning' });
+                    }
+                }
+                return;
+            }
+            const title = defaultExpenseTitleForBooking(b);
+            // 同步前必須先補齊付款者/分攤對象/分攤方式/幣別/匯率（需求 E），不能只把 cost 存起來卻不進結算——
+            // 沿用跟一般支出表單完全相同的驗證，缺什麼就用完全相同的措辭告訴使用者缺什麼。
+            const draftForValidation = {
+                title, amount: cost, currency: b.currency || setup.value.currency || 'USD',
+                paidByMemberId: b.paidByMemberId, splitAmongMemberIds: b.splitAmongMemberIds || [],
+                splitMethod: b.splitMethod || 'equal', customSplits: b.customSplits || {},
+                exchangeRateToTWD: b.exchangeRateToTWD,
+            };
+            const err = validateExpenseDraft(draftForValidation);
+            if (err) {
+                console.error('Sync booking to expense validation failed:', err, JSON.parse(JSON.stringify(b)));
+                showToast(`訂位費用尚未同步到記帳：${err}`, { icon: 'ph-bold ph-warning' });
+                return;
+            }
+            const rateFields = buildExpenseRateFields(draftForValidation);
+            const payerId = b.paidByMemberId;
+            const nowIso = new Date().toISOString();
+            const splitMethod = draftForValidation.splitMethod;
+            const payload = {
+                title, category: bookingCategoryForType(b.type), amount: cost,
+                currency: draftForValidation.currency,
+                ...rateFields, summaryAmountTWD: cost * (Number(rateFields.exchangeRateToTWD) || 0),
+                paidByMemberId: payerId,
+                splitAmongMemberIds: splitMethod === 'personal' ? [payerId] : [...(b.splitAmongMemberIds || [])],
+                splitMethod,
+                customSplits: (splitMethod === 'customAmount' || splitMethod === 'customPercent') ? { ...(b.customSplits || {}) } : {},
+                notes: b.notes || '',
+                sourceBookingId: b.id,
+                updatedAt: nowIso, updatedByMemberId: currentActorMemberId.value,
+            };
+            try {
+                if (existing) {
+                    const costChanged = Number(existing.amount) !== cost || existing.currency !== payload.currency;
+                    if (costChanged) {
+                        const ok = await appConfirm(`這個訂位的費用已變更為 ${payload.currency} ${cost}，要更新記帳裡對應的支出嗎？`, { title: '更新支出', confirmText: '更新' });
+                        if (!ok) return;
+                    }
+                    const ref = doc(db, 'trips', currentTripId.value, 'expenses', existing.id);
+                    await setDoc(ref, { ...payload, version: (existing.version || 1) + 1 }, { merge: true });
+                } else {
+                    const ref = doc(collection(db, 'trips', currentTripId.value, 'expenses'));
+                    await setDoc(ref, {
+                        ...payload,
+                        createdAt: nowIso, createdByMemberId: currentActorMemberId.value,
+                        version: 1, deleted: false, deletedAt: null, deletedByMemberId: null,
+                    });
+                }
+            } catch (e) {
+                console.error('Sync booking to expense failed', e);
+                showToast(firebaseErrorMessage(e, '同步到記帳失敗'), { icon: 'ph-bold ph-warning' });
+            }
+        };
+
         const bookingModal = reactive({ show: false, mode: 'add', targetId: null, draft: null });
         const openBookingModal = (b = null) => {
             if (b) {
@@ -858,20 +2132,34 @@ createApp({
             if (!bookingModal.draft || bookingModal.draft.type === type) return;
             bookingModal.draft = createBookingDraftForType(type, bookingModal.draft);
         };
-        const saveBookingModal = () => {
+        const saveBookingModal = async () => {
+            let saved = null;
             if (bookingModal.mode === 'edit') {
                 const target = bookings.value.find(b => b.id === bookingModal.targetId);
-                if (target) Object.assign(target, bookingModal.draft);
+                if (target) { Object.assign(target, bookingModal.draft); saved = target; }
             } else {
-                bookings.value.push({ ...bookingModal.draft });
+                saved = { ...bookingModal.draft };
+                bookings.value.push(saved);
             }
             bookingModal.show = false;
+            if (!saved) return;
+            syncBookingToItinerary(saved);
+            await syncBookingToExpense(saved);
         };
-        const deleteBookingFromModal = () => {
+        const deleteBookingFromModal = async () => {
             bookingModal.show = false;
             const idx = bookings.value.findIndex(b => b.id === bookingModal.targetId);
             if (idx === -1) return;
             const removed = bookings.value.splice(idx, 1)[0];
+            // 連動清掉這筆 booking 產生的行程項目和記帳項目，避免刪除訂位後留下孤兒資料；
+            // 註：這兩個連動清除目前不隨 undo 復原（只有 booking 本身會復原），是刻意的最小修改取捨
+            removeGeneratedItineraryItems(removed.id);
+            removeGeneratedFlightInfo(removed.id);
+            const linkedExpense = findExpenseByBookingId(removed.id);
+            if (linkedExpense && db && currentTripId.value) {
+                const ref = doc(db, 'trips', currentTripId.value, 'expenses', linkedExpense.id);
+                setDoc(ref, { deleted: true, deletedAt: new Date().toISOString(), deletedByMemberId: currentActorMemberId.value, updatedAt: new Date().toISOString(), version: (linkedExpense.version || 1) + 1 }, { merge: true }).catch(e => console.error('Delete linked expense failed', e));
+            }
             showToast('已刪除訂位/票券', { icon: 'ph-bold ph-trash', undo: () => { bookings.value.splice(Math.min(idx, bookings.value.length), 0, removed); } });
         };
         // 依 type 決定拿哪個欄位當排序用的日期：hotel 用 check-in、flight 用第一段的出發日期時間、其餘沿用通用 date/time
@@ -887,8 +2175,9 @@ createApp({
         // Bookings 航班段的日期時間是分開欄位（不是 datetime-local），組成字串後沿用既有的 formatLayover 算轉機時間
         const formatBookingSegDateTime = (date, time) => date ? `${date.replaceAll('-', '/')}${time ? ' ' + time : ''}` : (time || '');
         const bookingLayover = (prevSeg, nextSeg) => {
-            if (!prevSeg.arrivalDate || !prevSeg.arrivalTime || !nextSeg.departureDate || !nextSeg.departureTime) return '';
-            return formatLayover(`${prevSeg.arrivalDate}T${prevSeg.arrivalTime}`, `${nextSeg.departureDate}T${nextSeg.departureTime}`);
+            const arr = (prevSeg.arrivalDate && prevSeg.arrivalTime) ? `${prevSeg.arrivalDate}T${prevSeg.arrivalTime}` : '';
+            const dep = (nextSeg.departureDate && nextSeg.departureTime) ? `${nextSeg.departureDate}T${nextSeg.departureTime}` : '';
+            return layoverLabel(arr, dep);
         };
 
         // ============================================================================================
@@ -1198,6 +2487,29 @@ createApp({
             showToast('已取回旅程', { icon: 'ph-bold ph-box-arrow-up' });
             adoptTrip(t);
         };
+        // 永久刪除：只開放給「已封存」的旅程（測試行程／不再需要的舊行程），跟封存不同——這裡是真的從
+        // Firestore 刪掉，沒有 undo，用來真正釋放空間。子集合（expenses）不會因為刪掉父文件就自動被清掉，
+        // 必須自己撈出來逐筆刪除，否則變成撈不到、卻仍佔用空間的孤兒文件。
+        const deleteArchivedTrip = async (t) => {
+            if (!db) return;
+            const ok = await appConfirm(
+                `「${t.destination || '未命名行程'}」將被永久刪除，包含所有支出記錄，且無法復原，確定嗎？`,
+                { title: '永久刪除旅程', danger: true, confirmText: '永久刪除' }
+            );
+            if (!ok) return;
+            try {
+                const expensesSnap = await getDocs(collection(db, 'trips', t.id, 'expenses'));
+                await Promise.all(expensesSnap.docs.map(d => deleteDoc(d.ref)));
+                await deleteDoc(doc(db, 'trips', t.id));
+                allTrips.value = allTrips.value.filter(x => x.id !== t.id);
+                tripList.value = tripList.value.filter(x => x.id !== t.id);
+                saveTripList();
+                showToast('已永久刪除旅程', { icon: 'ph-bold ph-trash' });
+            } catch (e) {
+                console.error('Delete trip failed', e);
+                showToast('刪除失敗，請再試一次', { icon: 'ph-bold ph-warning' });
+            }
+        };
         watch(showTripMenu, (v) => { if (v && allTripsStatus.value === 'idle') loadAllTrips(); });
 
         const createNewTrip = () => {
@@ -1214,7 +2526,7 @@ createApp({
             members.value = [];
             if (unsubscribeExpenses) { unsubscribeExpenses(); unsubscribeExpenses = null; }
             expenses.value = [];
-            newExpense.value.payerMemberId = '';
+            newExpense.value = createExpenseDraft();
             isRateLoading.value = false;
             isSettingPasscode.value = false; passcodeDraftInput.value = '';
             nextTick(() => ignoreRemoteUpdate = false);
@@ -1424,7 +2736,9 @@ createApp({
             myPresentation.value = newTripUseAsaTemplate.value ? seedAsaSanDiego2026Presentation() : defaultPresentation();
             exchangeRate.value = setup.value.rate;
             // 成員已在 setup modal 收好（createNewTrip 開窗時已重置過），此處不可清空
-            newExpense.value.payerMemberId = memberIdByName(participants.value[0]) || '';
+            newExpense.value = createExpenseDraft();
+            newExpense.value.paidByMemberId = memberIdByName(participants.value[0]) || '';
+            applyFetchedRate(newExpense.value); // 旅程的 base currency 這時才真的定案，順便補一次匯率快照
 
             tripList.value.unshift(newTripMeta);
             saveTripList();
@@ -1553,6 +2867,18 @@ createApp({
                     bookings.value = (data.bookings || []).filter(b => b);
                     bookings.value.forEach(b => { if (!b.id) b.id = generateId(); migrateBookingFlightShape(b); });
 
+                    // 修正舊資料：先前的 bug 會把勾了「同步到行程」的航班 booking 拆成一般 timeline item
+                    // （type: 'transport'，sourceBookingId 指向該 flight booking）。航班現在一律走「航班資訊」
+                    // 卡片，不應該留在 timeline 裡，載入時順手清掉，避免同一航班同時出現在訂位/航班資訊/一般行程三處。
+                    const flightBookingIds = new Set(bookings.value.filter(b => b.type === 'flight').map(b => b.id));
+                    if (flightBookingIds.size) {
+                        days.value.forEach(day => {
+                            if (day.items && day.items.length) {
+                                day.items = day.items.filter(i => !(i.sourceBookingId && flightBookingIds.has(i.sourceBookingId)));
+                            }
+                        });
+                    }
+
                     conferenceSessions.value = (data.conferenceSessions || []).filter(s => s);
                     conferenceSessions.value.forEach(s => { if (!s.id) s.id = generateId(); });
                     conferenceVenues.value = (data.conferenceVenues || []).filter(v => v);
@@ -1582,6 +2908,9 @@ createApp({
                     // Prevent setup leakage from previous trip
                     const defaultSetup = { destination: '', startDate: '2026-10-14', days: 8, rate: 1, currency: 'USD', langCode: 'en', langName: '英文', mapProvider: 'google' };
                     setup.value = data.setup || defaultSetup;
+                    // 整份重置支出草稿，不沿用上一趟旅程選的幣別/分攤方式/分攤對象
+                    newExpense.value = createExpenseDraft();
+                    applyFetchedRate(newExpense.value); // 這趟旅程的 base currency 已載入，順便補一次匯率快照
 
                     if (data.rate) exchangeRate.value = data.rate;
                     if (data.users) {
@@ -1590,7 +2919,8 @@ createApp({
                         participantsStr.value = '';
                     }
                     updateParticipants();
-                    if (!activeMembers.value.some(m => m.id === newExpense.value.payerMemberId)) newExpense.value.payerMemberId = memberIdByName(participants.value[0]) || '';
+                    if (!activeMembers.value.some(m => m.id === newExpense.value.paidByMemberId)) newExpense.value.paidByMemberId = memberIdByName(participants.value[0]) || '';
+                    newExpense.value.splitAmongMemberIds = defaultSplitIds();
 
                     if (data.weather_loc) {
                         if (weather.value) weather.value.location = data.weather_loc;
@@ -1761,13 +3091,26 @@ createApp({
         });
 
         return {
-            viewMode, currentDayIdx, days, currentDay, participants, participantsStr, updateParticipants,
+            viewMode, currentDayIdx, days, currentDay, currentDayTimelineItems, participants, participantsStr, updateParticipants,
             getExternalMapLink, removeFlight, addDay,
-            addFlightSegment, removeFlightSegment, moveFlightSegment, formatFlightTime, isNextDayArrival, formatLayover,
+            addFlightSegment, removeFlightSegment, moveFlightSegment, formatFlightTime, isNextDayArrival, formatLayover, layoverLabel,
             revealedFlightConfirmations, toggleFlightConfirmation, maskConfirmation,
-            expenses, visibleExpenses, newExpense, totalExpense, addExpense,
-            paidByPerson, owedByPerson, netBalanceByPerson, settlementTransfers, exchangeRate,
+            expenses, visibleExpenses, newExpense, totalExpense, addExpense, expenseAmountTWD,
+            usedCurrencies, settlementByCurrency, secondaryReferenceTotal, secondaryReferenceRate, exchangeRate,
+            sharedOnlySettlementByCurrency, sharedOnlyNetTWD,
+            twdSummary, moneyViewError, createEmptyMemberSummary, safeMembers,
+            currentMemberId, expenseKind, expenseKindLabel, expenseVisibleToMember, expenseMemberShares,
+            sharedExpensesList, myPersonalExpensesList, myReimbursementExpensesList, mySettlementByCurrency,
+            calculateMemberTripCost, myTripCost, myTripTotalByCurrencyList, mySecondaryReferenceTotal,
+            showTripTotalDetail,
+            memberPersonalTotalsByCurrency, setExpenseType, EXPENSE_TYPE_OPTIONS, SHARED_SPLIT_METHODS,
+            showOverallSettlement,
+            fmtMoney, expenseNeedsRate, expensesMissingRate,
+            EXPENSE_CATEGORIES, expenseCategoryLabel, expenseCategoryIcon, SPLIT_METHODS, splitMethodLabel,
+            setSplitMethod, onExpensePayerChange, toggleSplitMember, customSplitTotal, customSplitRemaining,
+            applyFetchedRate, isPayerInvalid, isSplitInvalid,
             members, activeMembers, memberIdByName, memberNameById,
+            CURRENCY_SYMBOLS, currencyCodeOptions, symbolForCurrency,
             expenseSyncStatus, expModal, openExpModal, saveExpModal, deleteExpFromModal,
             reloadExpModalFromConflict, overwriteExpModalConflict,
             newParticipant, addParticipant, removeParticipant,
@@ -1776,7 +3119,7 @@ createApp({
             showSetupModal, setup, initTrip, weatherDisplay, detectRate, isRateLoading, currencyLabel, currencySymbol, toggleFlightCard, getDotColor,
             newTripUseAsaTemplate, useAsaSanDiego2026Template, useBlankTripTemplate,
             showTripMenu, tripList, createNewTrip, switchTrip, archiveTrip, currentTripId,
-            allTrips, allTripsStatus, showArchivedTrips, loadAllTrips, otherTrips, archivedTrips, adoptTrip, unarchiveTrip,
+            allTrips, allTripsStatus, showArchivedTrips, loadAllTrips, otherTrips, archivedTrips, adoptTrip, unarchiveTrip, deleteArchivedTrip,
             openEditModal, cancelSetupModal, isEditing, mapProviderLabel, amountInputRef, isAmountInvalid, itemInputRef, isItemInvalid, isUrl,
             tripLocked, passcodeInput, passcodeError, isUnlockingPasscode, unlockTrip,
             passcodeDraftInput, isSettingPasscode, openPasscodeEditor, cancelPasscodeEditor, removeTripPasscode,
@@ -1800,6 +3143,10 @@ createApp({
             showJoinInput, joinTripUrl, joinTrip,
             dialog, dialogAnswer, toast, undoToast,
             itemModal, openItemModal, saveItemModal, deleteItemFromModal,
+            itemTypeLabel,
+            textImportModal, openTextImportModal, closeTextImportModal, backToPasteStep,
+            TEXT_IMPORT_PROMPT, copyTextImportPrompt,
+            previewTextImport, toggleAllImportRows, toggleAllFlightJourneys, confirmTextImport, undoLastImport, lastImportBatch,
             locModal, openLocModal, saveLocModal, deleteLocFromModal,
             LOC_PREF_ORDER, LOC_PREF_META, setLocPref, otherMemberPrefs, locConsensus,
             checklist, collapsedCats, toggleCat, checklistMembers, memberLabel, toggleCheck,
@@ -1809,4 +3156,13 @@ createApp({
             CHECKLIST_CATEGORIES, LUGGAGE_META
         };
     }
-}).mount('#app')
+})
+
+// ---- 全域防呆（需求 G）：任何一個沒被個別 computed 的 try/catch 接住的 render/watcher 錯誤，
+// 最後都會經過這裡——一律 console.error 完整錯誤方便排查，不讓一顆沒接住的例外直接讓整頁變白畫面。
+// 個別畫面（例如記帳頁）自己的 try/catch 永遠是第一線，這裡只是最後一道保險。
+app.config.errorHandler = (err, instance, info) => {
+    console.error('[App] 未捕捉的錯誤', err, info);
+};
+
+app.mount('#app')

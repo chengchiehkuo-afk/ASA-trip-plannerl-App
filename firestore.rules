@@ -1,30 +1,48 @@
 rules_version = '2';
 
 // WeTravel Firestore 安全規則
-// 部署方式：Firebase Console → Firestore Database → 規則 → 貼上本檔內容 → 發布
+// ------------------------------------------------------------------------------------------------
+// 部署方式（手動、沒有 CI/CD）：Firebase Console → Firestore Database → 規則 → 貼上本檔「完整內容」
+// → 發布。這份規則只活在這個檔案跟 Console 裡的發布版本；改了這個檔案不會自動生效，一定要手動貼上發布，
+// 否則 app 端已經照新版寫入，但線上規則還是舊版，會出現「app 邏輯沒問題，卻 permission-denied」的落差。
 //
 // 協作模型：行程以「知道連結（tripId）即可協作」的方式共享，
-// 因此已登入（含匿名登入）者可讀寫 trips；其餘路徑一律拒絕。
+// 因此已登入（含匿名登入）者可讀寫 trips；其餘路徑一律拒絕。旅程密碼（trip passcode）是 app UI 層級的
+// 顯示保護（鎖住畫面內容），不是這裡的存取控制邊界——知道 tripId 的已登入使用者一律能讀寫，跟舊版行為一致。
+//
+// 資料放在哪裡（對照 app.js 實際寫入路徑，修改規則前請先確認 app.js 有沒有新增其他 collection()/doc() 呼叫）：
+//   - trips/{tripId}                 單一文件：days（行程）、bookings（訂位/票券）、checklist（清單）、
+//                                     savedLocations（口袋名單）、conferenceSessions/conferenceVenues/
+//                                     myPresentation（議程）、setup/members/participantsStr 等，全部是
+//                                     這一份文件裡的欄位，不是各自的 subcollection，所以只需要這一條規則就夠。
+//   - trips/{tripId}/expenses/{id}   唯一的真子集合：每筆支出各自一份文件（見下方 match 區塊）。
+//   settlement（誰欠誰）不落地存成文件——一律由前端從未刪除的 expenses 即時算出來，這裡沒有對應的規則需求。
 service cloud.firestore {
   match /databases/{database}/documents {
 
     // 行程文件：需登入（App 使用匿名登入）
-    // 刪除一律拒絕：App 採封存制（archived 旗標），不存在正當的刪除路徑；
-    // 這條規則防止有人繞過 App 直接呼叫 deleteDoc 毀損資料。
+    // 刪除：App 主要走封存制（archived 旗標），但額外開放「已封存旅程的永久刪除」這條路徑，
+    // 讓測試行程／不再需要的舊行程可以真的釋放空間——App UI 只在「已封存」清單裡才顯示刪除按鈕，
+    // 且刪除前一定會跳確認視窗；這裡的規則沒辦法強制「一定要先封存過」，屬於 App UI 層的把關，
+    // 不是這裡的存取控制邊界，跟旅程密碼是同樣的權衡（見檔案開頭的協作模型說明）。
     match /trips/{tripId} {
-      allow read, create, update: if request.auth != null;
-      allow delete: if false;
+      allow read, create, update, delete: if request.auth != null;
 
       // 支出改存成獨立子集合文件（每筆支出各自一份 doc），避免多人同時新增/修改支出時
       // 整份 expenses 陣列互相覆蓋。子集合路徑不會自動繼承上層 /trips/{tripId} 的規則，
-      // 必須另外宣告，否則會被下面的 catch-all 擋掉——套用跟父層完全相同的政策（需登入、只能軟刪除）。
+      // 必須另外宣告，否則會被下面的 catch-all 擋掉。刪除 trip 文件不會自動清掉這個子集合，
+      // 永久刪除旅程時 App 會先逐筆刪除這裡的文件，再刪 trip 本身，所以這裡也要開放 delete，
+      // 否則子集合文件會變成永遠撈不到、卻仍佔用空間的孤兒資料。
+      // 如果新增支出時出現「permission denied」，最常見的原因就是這個 match 區塊還沒被發布到
+      // Firebase Console 上（app.js 已經在用 trips/{tripId}/expenses/{expenseId} 這個路徑寫入，
+      // 但 Console 上還留著沒有這段的舊版規則）——貼上本檔「整份」內容重新發布即可解決。
       match /expenses/{expenseId} {
-        allow read, create, update: if request.auth != null;
-        allow delete: if false;
+        allow read, create, update, delete: if request.auth != null;
       }
     }
 
-    // 其他所有路徑：一律拒絕
+    // 其他所有路徑：一律拒絕。刻意不開放 allow read, write: if true，也不逐一列舉不存在的
+    // collection（例如沒有獨立的 bookings/checklist/pocketList collection 需要規則，見上方說明）。
     match /{document=**} {
       allow read, write: if false;
     }

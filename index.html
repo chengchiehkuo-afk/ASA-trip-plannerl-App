@@ -445,13 +445,21 @@
             <transition v-if="!tripLocked" name="fade" mode="out-in">
                 <div v-if="viewMode === 'plan'" key="plan" class="view-pane p-5 pb-32 space-y-6 w-full">
 
-                    <div class="flex items-center justify-between">
-                        <h2 class="text-xl font-black text-stone-800 flex items-center gap-2">
-                            <span class="bg-stone-800 text-white px-2 py-0.5 rounded-lg text-sm">Day {{
+                    <div class="flex items-center justify-between gap-2">
+                        <h2 class="text-xl font-black text-stone-800 flex items-center gap-2 min-w-0">
+                            <span class="bg-stone-800 text-white px-2 py-0.5 rounded-lg text-sm shrink-0">Day {{
                                 currentDayIdx +
                                 1 }}</span>
-                            {{ currentDay.date || '未設定日期' }}
+                            <span class="truncate">{{ currentDay.date || '未設定日期' }}</span>
                         </h2>
+                        <button @click="openTextImportModal"
+                            class="flex items-center gap-1 text-xs font-bold text-primary-600 bg-primary-50 px-3 py-2 rounded-xl hover:bg-primary-100 active:scale-95 transition shrink-0">
+                            <i class="ph-bold ph-clipboard-text"></i> 匯入行程文字
+                        </button>
+                    </div>
+                    <div v-if="lastImportBatch" class="flex items-center justify-between text-xs text-stone-500 bg-stone-50 rounded-xl px-3 py-2">
+                        <span>上次文字匯入了 {{ lastImportBatch.itemCount }} 筆行程、{{ lastImportBatch.flightCount }} 筆航班</span>
+                        <button @click="undoLastImport" class="text-red-500 font-bold hover:text-red-600 transition">撤回上一次匯入</button>
                     </div>
 
                     <!-- Day Title -->
@@ -536,11 +544,11 @@
                                             </div>
                                         </div>
 
-                                        <!-- 轉機時間（能算就顯示，不能算就交給 notes） -->
-                                        <div v-if="!editingState.flight && idx < currentDay.flight.segments.length - 1 && formatLayover(seg.arrivalDateTime, currentDay.flight.segments[idx + 1].departureDateTime)"
+                                        <!-- 轉機時間：只要有下一段就一定顯示，算得出來顯示時長，資料不足顯示「待補」（需求 A） -->
+                                        <div v-if="!editingState.flight && idx < currentDay.flight.segments.length - 1"
                                             class="flex justify-center">
                                             <span class="text-[11px] font-bold text-amber-700 bg-amber-50 rounded-full py-1 px-3">
-                                                {{ formatLayover(seg.arrivalDateTime, currentDay.flight.segments[idx + 1].departureDateTime) }}
+                                                {{ layoverLabel(seg.arrivalDateTime, currentDay.flight.segments[idx + 1].departureDateTime) }}
                                             </span>
                                         </div>
 
@@ -612,7 +620,7 @@
 
                     <!-- Timeline Items -->
                     <div class="relative pl-6 border-l-2 border-dashed border-stone-200 space-y-6">
-                        <template v-for="(item, idx) in currentDay.items" :key="item && item.id || idx">
+                        <template v-for="(item, idx) in currentDayTimelineItems" :key="item && item.id || idx">
                             <div v-if="item" class="relative group">
                                 <div class="absolute -left-[31px] top-5 w-4 h-4 rounded-full border-[3px] border-stone-50 shadow-sm z-10 transition-colors duration-300"
                                     :class="getDotColor(item.type)"></div>
@@ -639,7 +647,7 @@
                                                 <span v-else-if="item.type==='food'">🍴</span>
                                                 <span v-else-if="item.type==='shop'">🛍️</span>
                                                 <span v-else-if="item.type==='transport'">🚇</span>
-                                                <span v-else-if="item.type==='hotel'">🏨</span>
+                                                <span v-else-if="item.type==='hotel'">🛏️</span>
                                                 <span v-else-if="item.type==='conference'">🎤</span>
                                                 <span v-else>📍</span>
                                             </div>
@@ -728,7 +736,7 @@
                                         ｜{{ seg.departureAirport || '?' }} {{ formatBookingSegDateTime(seg.departureDate, seg.departureTime) }}
                                         → {{ seg.arrivalAirport || '?' }} {{ formatBookingSegDateTime(seg.arrivalDate, seg.arrivalTime) }}
                                     </div>
-                                    <div v-if="idx < b.segments.length - 1 && bookingLayover(seg, b.segments[idx + 1])" class="flex justify-center">
+                                    <div v-if="idx < b.segments.length - 1" class="flex justify-center">
                                         <span class="text-[11px] font-bold text-amber-700 bg-amber-50 rounded-full py-0.5 px-3">{{ bookingLayover(seg, b.segments[idx + 1]) }}</span>
                                     </div>
                                 </template>
@@ -846,7 +854,7 @@
                                                 <span v-if="loc.type==='food'">🍴</span>
                                                 <span v-else-if="loc.type==='shop'">🛍️</span>
                                                 <span v-else-if="loc.type==='transport'">🚇</span>
-                                                <span v-else-if="loc.type==='hotel'">🏨</span>
+                                                <span v-else-if="loc.type==='hotel'">🛏️</span>
                                                 <span v-else-if="loc.type==='conference'">🎤</span>
                                                 <span v-else>📍</span>
                                             </span>
@@ -901,83 +909,175 @@
 
                 <div v-else-if="viewMode === 'money'" key="money"
                     class="view-pane p-5 pb-32 space-y-6 flex-1 overflow-y-auto hide-scroll">
+
+                    <!-- 記帳頁防呆 banner：任何一筆支出/成員資料有問題導致結算算不出來時，顯示這個提示而不是整頁空白，
+                         詳細錯誤一律 console.error，這裡只給使用者看得懂的一句話。 -->
+                    <div v-if="moneyViewError" class="bg-red-50 border border-red-200 text-red-700 text-sm font-bold rounded-2xl px-4 py-3 flex items-start gap-2">
+                        <i class="ph-bold ph-warning-circle text-lg shrink-0"></i>
+                        <span>{{ moneyViewError }}</span>
+                    </div>
+
+                    <!-- 身份選擇閘門（需求 C）：沿用打包清單既有的裝置身份機制（activeChecklistMember），
+                         尚未選擇「這是誰」之前，記帳頁不顯示任何人的個人支出——避免還沒選身份時，畫面短暫
+                         顯示了不該預設看到的內容。選過一次後，清單頁也會沿用同一個身份，不用分開選兩次。 -->
+                    <div v-if="!activeChecklistMember && checklistMembers.length > 1"
+                        class="bg-white p-6 rounded-3xl border border-stone-100 shadow-sm text-center space-y-4">
+                        <i class="ph-bold ph-wallet text-4xl text-primary-400"></i>
+                        <div>
+                            <h3 class="text-lg font-black text-stone-800">這是誰的記帳視角？</h3>
+                            <p class="text-sm text-stone-500 mt-1 leading-relaxed">選擇後只會顯示你自己的個人支出，共同支出仍會顯示給所有旅伴一起核對。</p>
+                        </div>
+                        <div class="flex flex-wrap justify-center gap-2">
+                            <button v-for="m in checklistMembers" :key="m" @click="chooseChecklistMember(m)"
+                                class="px-4 py-2.5 rounded-xl text-sm font-bold border bg-stone-50 border-stone-200 text-stone-700 hover:border-primary-300 hover:bg-primary-50 transition">
+                                我是 {{ memberLabel(m) || '共用' }}
+                            </button>
+                        </div>
+                    </div>
+
+                    <template v-else>
                     <div
                         class="bg-gradient-to-br from-stone-800 to-stone-900 text-white rounded-3xl p-6 shadow-xl shadow-stone-500/20 relative overflow-hidden group">
 
-                        <div class="relative z-10 flex justify-between items-start">
-                            <div>
-                                <div class="text-teal-100 text-xs font-bold tracking-widest uppercase mb-1">Total
-                                    Expense
+                        <div class="relative z-10">
+                            <button type="button" @click="showTripTotalDetail = !showTripTotalDetail"
+                                class="w-full text-left">
+                                <div class="text-teal-100 text-xs font-bold tracking-widest uppercase mb-1 flex items-center justify-between">
+                                    <span>Total Expense｜旅程總支出</span>
+                                    <i class="ph-bold" :class="showTripTotalDetail ? 'ph-caret-up' : 'ph-caret-down'"></i>
                                 </div>
-                                <div class="text-4xl font-black font-mono tracking-tight">{{ currencySymbol }} {{
-                                    totalExpense.toLocaleString() }}</div>
-                                <div
-                                    class="text-sm font-medium text-teal-100 mt-2 flex items-center gap-1 bg-white/10 w-fit px-2 py-1 rounded-lg backdrop-blur-sm">
-                                    <i class="ph-bold ph-arrows-left-right"></i> ≈ NT$ {{ Math.round(totalExpense *
-                                    exchangeRate).toLocaleString() }}
-                                </div>
+                                <!-- 我的旅程總支出（不是全員支出總和）：個人支出 + 共同支出自己分攤額 + 與自己有關代付中自己受益的部分，
+                                     見 app.js 的 calculateMemberTripCost。約合台幣一律用每筆 expense 自己鎖定的 exchangeRateToTWD 換算。 -->
+                                <div class="text-4xl font-black font-mono tracking-tight">NT$ {{ fmtMoney(myTripCost.myTripTotalTWD) }}</div>
+                            </button>
+
+                            <div v-if="expensesMissingRate.length"
+                                class="text-xs font-bold text-amber-100 mt-2 flex items-center gap-1 bg-amber-500/20 w-fit px-2 py-1 rounded-lg">
+                                <i class="ph-bold ph-warning"></i> {{ expensesMissingRate.length }} 筆缺少匯率，未計入台幣總額
                             </div>
-                            <div class="text-right">
-                                <label class="text-[10px] text-teal-200 block mb-1">匯率 1{{ currencyLabel }}≈NT$</label>
-                                <input v-model.number="exchangeRate" @change="updateExchangeRate" type="number"
-                                    step="0.001" inputmode="decimal"
-                                    class="w-16 text-right text-sm font-bold text-teal-900 bg-white/80 focus:bg-white rounded-lg px-2 py-1 shadow-sm outline-none focus:ring-2 focus:ring-white/70">
+
+                            <div v-if="showTripTotalDetail" class="mt-4 pt-4 border-t border-white/10 space-y-1.5">
+                                <!-- 我的總支出 = 我需共同分攤的花費 + 我的個人花費（見 app.js 的 calculateMemberTripCost）。
+                                     不再另外顯示「共同總支出」整筆金額——那是全員的錢，不是「我的」總支出，容易被誤讀成總花費暴增。 -->
+                                <div class="text-[11px] font-black text-teal-100 uppercase tracking-wider">我的總支出</div>
+                                <div class="text-sm font-bold text-teal-50">約合台幣：NT$ {{ fmtMoney(myTripCost.myTripTotalTWD) }}</div>
+                                <div v-if="myTripTotalByCurrencyList.length" class="space-y-0.5">
+                                    <div v-for="g in myTripTotalByCurrencyList" :key="'my-' + g.currency"
+                                        class="flex items-center justify-between text-sm font-mono text-teal-50">
+                                        <span>{{ g.currency }}</span>
+                                        <span class="font-bold">{{ symbolForCurrency(g.currency) }}{{ fmtMoney(g.total) }}</span>
+                                    </div>
+                                </div>
+                                <div class="text-xs text-teal-200 space-y-0.5 pt-1">
+                                    <div v-for="cur in Object.keys(myTripCost.personalExpensesTotalByCurrency)" :key="'p-' + cur">
+                                        我的個人花費：{{ symbolForCurrency(cur) }}{{ fmtMoney(myTripCost.personalExpensesTotalByCurrency[cur]) }}
+                                    </div>
+                                    <div v-for="cur in Object.keys(myTripCost.sharedShareTotalByCurrency)" :key="'s-' + cur">
+                                        我需共同分攤的花費：{{ symbolForCurrency(cur) }}{{ fmtMoney(myTripCost.sharedShareTotalByCurrency[cur]) }}
+                                    </div>
+                                    <div v-for="cur in Object.keys(myTripCost.reimbursementRelatedTotalByCurrency)" :key="'r-' + cur">
+                                        與我有關的代付：{{ symbolForCurrency(cur) }}{{ fmtMoney(myTripCost.reimbursementRelatedTotalByCurrency[cur]) }}
+                                    </div>
+                                </div>
+                                <div v-if="mySecondaryReferenceTotal !== null" class="text-xs text-teal-200 pt-1">
+                                    參考：約合 {{ setup.currency }} {{ symbolForCurrency(setup.currency) }}{{ fmtMoney(mySecondaryReferenceTotal) }}（匯率 1 {{ setup.currency }} ≈ NT${{ fmtMoney(secondaryReferenceRate) }}）
+                                </div>
                             </div>
                         </div>
                     </div>
 
-                    <!-- 記帳成員 + 每人小計 -->
-                    <div class="bg-white p-4 rounded-3xl border border-stone-100 shadow-soft space-y-4">
-                        <!-- 成員（可加/刪） -->
-                        <div>
-                            <div class="text-[10px] text-stone-500 mb-2 pl-1 uppercase tracking-wider font-bold">成員</div>
-                            <div v-if="participants.length" class="flex flex-wrap gap-2 mb-2">
-                                <span v-for="p in participants" :key="p"
-                                    class="inline-flex items-center gap-1.5 bg-stone-100 rounded-full pl-3 pr-1.5 py-1.5 text-sm font-bold text-stone-700">
-                                    {{ p }}
-                                    <button @click="removeParticipant(p)"
-                                        class="w-5 h-5 flex items-center justify-center rounded-full text-stone-400 hover:bg-stone-300 hover:text-white transition">
-                                        <i class="ph-bold ph-x text-xs"></i>
-                                    </button>
+                    <!-- 記帳成員（新增/移除旅伴，跟身份選擇是分開兩件事：這裡是旅程結構，身份是裝置視角） -->
+                    <div class="bg-white p-4 rounded-3xl border border-stone-100 shadow-soft">
+                        <div class="text-[10px] text-stone-500 mb-2 pl-1 uppercase tracking-wider font-bold">成員</div>
+                        <div v-if="participants.length" class="flex flex-wrap gap-2 mb-2">
+                            <span v-for="p in participants" :key="p"
+                                class="inline-flex items-center gap-1.5 bg-stone-100 rounded-full pl-3 pr-1.5 py-1.5 text-sm font-bold text-stone-700">
+                                {{ p }}
+                                <button @click="removeParticipant(p)"
+                                    class="w-5 h-5 flex items-center justify-center rounded-full text-stone-400 hover:bg-stone-300 hover:text-white transition">
+                                    <i class="ph-bold ph-x text-xs"></i>
+                                </button>
+                            </span>
+                        </div>
+                        <div class="flex gap-2">
+                            <input v-model="newParticipant" @keyup.enter="addParticipant" placeholder="新增成員名字"
+                                class="flex-1 bg-stone-50 border-none rounded-xl text-sm font-bold text-stone-700 py-2.5 px-3 focus:ring-2 focus:ring-primary-200">
+                            <button @click="addParticipant"
+                                class="px-4 bg-primary-500 text-white rounded-xl text-sm font-bold shadow-md shadow-primary-500/30 active:scale-95 transition flex items-center gap-1 shrink-0">
+                                <i class="ph-bold ph-plus"></i> 加人
+                            </button>
+                        </div>
+                    </div>
+
+                    <!-- 需求 B1：我的總覽——依目前身份（currentMemberId）顯示個人開銷、共同分攤的已付/應分攤/淨額、
+                         跟我有關的轉帳建議。不在這裡放「切換成看別人視角」的選單——身份只在側邊選單/身份閘門切換，
+                         避免記帳頁主畫面被拿來隨手瀏覽別人的個人帳。 -->
+                    <div v-if="currentMemberId" class="bg-white p-4 rounded-3xl border border-stone-100 shadow-sm space-y-3">
+                        <h3 class="text-base font-black text-stone-800 flex items-center gap-1.5">
+                            <i class="ph-bold ph-user-circle text-primary-500"></i> 我的總覽｜{{ memberNameById(currentMemberId) }}
+                        </h3>
+                        <div v-if="expensesMissingRate.length" class="bg-amber-50 border border-amber-200 text-amber-700 text-xs font-bold rounded-xl px-3 py-2">
+                            <i class="ph-bold ph-warning"></i> {{ expensesMissingRate.length }} 筆支出缺少匯率，請補齊：{{ expensesMissingRate.map(e => e.title).join('、') }}
+                        </div>
+                        <div v-if="!mySettlementByCurrency.length" class="text-sm text-stone-400 text-center py-3">目前還沒有任何跟你有關的支出</div>
+                        <div v-for="g in mySettlementByCurrency" :key="g.currency" class="bg-stone-50 p-3 rounded-2xl border border-stone-100 space-y-1.5">
+                            <div class="text-[11px] font-bold text-stone-500 uppercase tracking-wider">{{ g.currency }}</div>
+                            <div v-if="g.personal" class="flex justify-between text-sm">
+                                <span class="text-stone-500">個人開銷</span>
+                                <span class="font-bold font-mono text-stone-700">{{ symbolForCurrency(g.currency) }}{{ fmtMoney(g.personal) }}</span>
+                            </div>
+                            <div class="flex justify-between text-sm">
+                                <span class="text-stone-500">我已付款</span>
+                                <span class="font-bold font-mono text-stone-700">{{ symbolForCurrency(g.currency) }}{{ fmtMoney(g.paid) }}</span>
+                            </div>
+                            <div class="flex justify-between text-sm">
+                                <span class="text-stone-500">我應分攤</span>
+                                <span class="font-bold font-mono text-stone-700">{{ symbolForCurrency(g.currency) }}{{ fmtMoney(g.share) }}</span>
+                            </div>
+                            <div class="flex justify-between text-sm pt-1 border-t border-stone-200">
+                                <span class="text-stone-500">我的淨額</span>
+                                <span class="font-black font-mono" :class="g.net >= 0 ? 'text-emerald-600' : 'text-red-500'">
+                                    {{ g.net >= 0 ? '+' : '' }}{{ symbolForCurrency(g.currency) }}{{ fmtMoney(g.net) }}
                                 </span>
                             </div>
-                            <div class="flex gap-2">
-                                <input v-model="newParticipant" @keyup.enter="addParticipant" placeholder="新增成員名字"
-                                    class="flex-1 bg-stone-50 border-none rounded-xl text-sm font-bold text-stone-700 py-2.5 px-3 focus:ring-2 focus:ring-primary-200">
-                                <button @click="addParticipant"
-                                    class="px-4 bg-primary-500 text-white rounded-xl text-sm font-bold shadow-md shadow-primary-500/30 active:scale-95 transition flex items-center gap-1 shrink-0">
-                                    <i class="ph-bold ph-plus"></i> 加人
-                                </button>
+                            <div v-if="g.transfers.length" class="space-y-1 pt-1">
+                                <div v-for="(t, i) in g.transfers" :key="i"
+                                    class="text-sm font-bold text-primary-700 bg-primary-50 border border-primary-100 rounded-xl px-3 py-2 flex items-center gap-1.5">
+                                    <i class="ph-bold ph-arrow-right"></i>
+                                    <span v-if="t.toId === currentMemberId">{{ t.from }} 需付給我 {{ symbolForCurrency(g.currency) }}{{ fmtMoney(t.amount) }}</span>
+                                    <span v-else>我需付給 {{ t.to }} {{ symbolForCurrency(g.currency) }}{{ fmtMoney(t.amount) }}</span>
+                                </div>
                             </div>
                         </div>
-
-                        <!-- 每人各付多少（小計，無正負、無結算） -->
-                        <div v-if="expenses.length" class="grid grid-cols-2 gap-3 border-t border-stone-100 pt-3">
-                            <div v-for="p in participants" :key="p"
-                                class="bg-stone-50 p-3 rounded-2xl border border-stone-100 flex items-center justify-between gap-2">
-                                <span class="text-sm font-bold text-stone-600 truncate">{{ p }}</span>
-                                <span class="text-sm font-black text-primary-600 shrink-0">{{ currencySymbol }}{{
-                                    Math.round(paidByPerson[p] || 0).toLocaleString() }}</span>
-                            </div>
+                        <div v-if="mySettlementByCurrency.length" class="text-[11px] text-stone-400 pl-1">
+                            我的淨額約合台幣 {{ (twdSummary.net[currentMemberId] || 0) >= 0 ? '+' : '' }}NT${{ fmtMoney(twdSummary.net[currentMemberId] || 0) }}（僅供參考）
                         </div>
                     </div>
 
-                    <div class="bg-white p-4 rounded-3xl border border-stone-100 shadow-sm mb-6">
-                        <div class="mb-3">
-                            <div class="text-[10px] text-stone-500 mb-1 pl-1">項目</div>
-                            <input ref="itemInputRef" v-model="newExpense.item" type="text" placeholder="例如: 午餐、地鐵"
+                    <!-- 新增支出表單（需求 A、H）：支出名稱／類別／金額／幣別／付款者／幫誰付（多選）／分攤方式／
+                         自訂金額或比例／匯率／備註／新增支出按鈕 -->
+                    <div class="bg-white p-4 rounded-3xl border border-stone-100 shadow-sm mb-6 space-y-3">
+                        <div>
+                            <div class="text-[10px] text-stone-500 mb-1 pl-1">支出名稱</div>
+                            <input ref="itemInputRef" v-model="newExpense.title" type="text" placeholder="例如: 住宿、晚餐、Uber"
                                 :class="{'ring-2 ring-red-300 bg-red-50': isItemInvalid}"
                                 @input="isItemInvalid = false"
                                 class="w-full bg-stone-50 border-none rounded-xl text-base font-bold text-stone-700 py-3 px-3 focus:ring-2 focus:ring-primary-200">
                         </div>
-                        <div class="flex items-end gap-2">
-                            <div class="w-24 shrink-0">
-                                <div class="text-[10px] text-stone-500 mb-1 pl-1">誰付錢</div>
-                                <select v-model="newExpense.payer"
-                                    class="w-full bg-stone-50 border-none rounded-xl text-sm font-bold text-stone-700 py-2.5 px-3 focus:ring-2 focus:ring-primary-200 appearance-none">
-                                    <option v-for="p in participants" :value="p">{{ p }}</option>
-                                </select>
+
+                        <div>
+                            <div class="text-[10px] text-stone-500 mb-1 pl-1">類別</div>
+                            <div class="grid grid-cols-6 gap-1 bg-stone-50 p-1 rounded-xl border border-stone-200">
+                                <button v-for="cat in EXPENSE_CATEGORIES" :key="cat.slug" type="button" @click="newExpense.category = cat.slug"
+                                    class="rounded-lg flex flex-col items-center justify-center py-1.5 transition-colors"
+                                    :class="newExpense.category === cat.slug ? 'bg-white shadow-sm' : 'opacity-40 hover:opacity-100'">
+                                    <i :class="cat.icon" class="text-sm text-stone-600"></i>
+                                    <span class="text-[9px] font-bold text-stone-500 mt-0.5">{{ cat.label }}</span>
+                                </button>
                             </div>
+                        </div>
+
+                        <div class="flex items-end gap-2">
                             <div class="flex-1">
                                 <div class="text-[10px] text-stone-500 mb-1 pl-1">金額</div>
                                 <input ref="amountInputRef" v-model.number="newExpense.amount" type="number"
@@ -986,39 +1086,326 @@
                                     @input="isAmountInvalid = false"
                                     class="w-full bg-stone-50 border-none rounded-xl text-lg font-black text-stone-700 py-2 px-3 focus:ring-2 focus:ring-primary-200 text-right font-mono tracking-tight">
                             </div>
-                            <button @click="addExpense"
-                                class="w-12 h-11 bg-primary-500 text-white rounded-xl flex items-center justify-center shadow-lg shadow-primary-500/30 hover:bg-primary-600 active:scale-95 transition shrink-0 mb-[1px]">
-                                <i class="ph-bold ph-plus text-xl"></i>
-                            </button>
+                            <div class="w-20 shrink-0">
+                                <div class="text-[10px] text-stone-500 mb-1 pl-1">幣別</div>
+                                <select v-model="newExpense.currency" @change="applyFetchedRate(newExpense)"
+                                    class="w-full bg-stone-50 border-none rounded-xl text-sm font-bold text-stone-700 py-2.5 px-2 focus:ring-2 focus:ring-primary-200 appearance-none">
+                                    <option v-for="c in currencyCodeOptions" :key="c" :value="c">{{ c }}</option>
+                                </select>
+                            </div>
                         </div>
+
+                        <div v-if="newExpense.currency && newExpense.currency !== 'TWD'">
+                            <label class="text-[10px] text-stone-400 font-bold block mb-1">換算成台幣的匯率（1 {{ newExpense.currency }} = ? TWD）</label>
+                            <div class="flex items-center gap-2">
+                                <input v-model.number="newExpense.exchangeRateToTWD" type="number" step="0.0001" inputmode="decimal"
+                                    class="flex-1 bg-stone-50 border-none rounded-xl text-sm text-stone-700 py-2 px-3 focus:ring-2 focus:ring-primary-200">
+                                <button type="button" @click="applyFetchedRate(newExpense)" title="重新抓匯率"
+                                    class="w-9 h-9 rounded-xl bg-stone-100 text-stone-500 flex items-center justify-center hover:bg-stone-200 active:scale-95 transition shrink-0">
+                                    <i class="ph-bold ph-arrows-clockwise" :class="{'animate-spin': newExpense.exchangeRateSource === 'loading'}"></i>
+                                </button>
+                            </div>
+                            <p class="text-[10px] mt-1" :class="newExpense.exchangeRateSource === 'manual' ? 'text-amber-600' : 'text-stone-400'">
+                                <span v-if="newExpense.exchangeRateSource === 'loading'">正在抓取即時匯率...</span>
+                                <span v-else-if="newExpense.exchangeRateSource === 'api'">已自動抓取匯率，約合台幣 NT${{ fmtMoney((Number(newExpense.amount) || 0) * (Number(newExpense.exchangeRateToTWD) || 0)) }}</span>
+                                <span v-else>匯率取得失敗，請手動輸入匯率</span>
+                            </p>
+                        </div>
+
+                        <!-- 支出類型（需求 F）：個人/共同/代付，決定付款者、分攤對象的預設值與可見的子表單 -->
+                        <div>
+                            <div class="text-[10px] text-stone-500 mb-1 pl-1">支出類型</div>
+                            <div class="grid grid-cols-3 gap-1 bg-stone-50 p-1 rounded-xl border border-stone-200">
+                                <button v-for="t in EXPENSE_TYPE_OPTIONS" :key="t.slug" type="button" @click="setExpenseType(newExpense, t.slug)"
+                                    class="rounded-lg flex flex-col items-center justify-center py-2 gap-0.5 transition-colors"
+                                    :class="newExpense.expenseType === t.slug ? 'bg-white shadow-sm text-stone-700' : 'opacity-40 text-stone-500 hover:opacity-100'">
+                                    <i :class="t.icon" class="text-base"></i>
+                                    <span class="text-[10px] font-bold">{{ t.label }}</span>
+                                </button>
+                            </div>
+                        </div>
+
+                        <div v-if="newExpense.expenseType === 'personal'" class="text-xs text-stone-500 bg-stone-50 rounded-xl px-3 py-2.5 flex items-center gap-1.5">
+                            <i class="ph-bold ph-info"></i> 個人支出：由 {{ memberNameById(newExpense.paidByMemberId) || '你自己' }} 負擔，只有你自己看得到，不進共同分帳。
+                        </div>
+
+                        <div v-else class="flex gap-2">
+                            <div class="w-24 shrink-0">
+                                <div class="text-[10px] text-stone-500 mb-1 pl-1">付款者</div>
+                                <select v-model="newExpense.paidByMemberId" @change="onExpensePayerChange(newExpense)"
+                                    :class="{'ring-2 ring-red-300 bg-red-50': isPayerInvalid}"
+                                    class="w-full bg-stone-50 border-none rounded-xl text-sm font-bold text-stone-700 py-2.5 px-2 focus:ring-2 focus:ring-primary-200 appearance-none">
+                                    <option value="" disabled>選擇付款者</option>
+                                    <option v-for="m in activeMembers" :key="m.id" :value="m.id">{{ m.name }}</option>
+                                </select>
+                            </div>
+                            <div class="flex-1">
+                                <div class="text-[10px] text-stone-500 mb-1 pl-1">分攤方式</div>
+                                <div class="grid grid-cols-3 gap-1 bg-stone-50 p-1 rounded-xl border border-stone-200 h-[42px]">
+                                    <button v-for="method in SHARED_SPLIT_METHODS" :key="method.slug" type="button" @click="setSplitMethod(newExpense, method.slug)"
+                                        class="rounded-lg text-[10px] font-bold transition-colors"
+                                        :class="newExpense.splitMethod === method.slug ? 'bg-white shadow-sm text-stone-700' : 'opacity-40 text-stone-500 hover:opacity-100'">
+                                        {{ method.label }}
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div v-if="newExpense.expenseType !== 'personal'">
+                            <div class="text-[10px] text-stone-500 mb-1 pl-1 flex items-center gap-2">
+                                {{ newExpense.expenseType === 'reimbursement' ? '代付給誰' : '幫誰付' }}
+                                <span v-if="isSplitInvalid" class="text-red-500 normal-case">請至少選擇一位{{ newExpense.expenseType === 'reimbursement' ? '被代付者' : '分攤對象' }}</span>
+                            </div>
+                            <div class="flex flex-wrap gap-1.5">
+                                <button v-for="m in activeMembers" :key="m.id" type="button" @click="toggleSplitMember(newExpense, m.id)"
+                                    class="px-3 py-1.5 rounded-full text-xs font-bold border transition"
+                                    :class="newExpense.splitAmongMemberIds.includes(m.id) ? 'bg-primary-500 border-primary-500 text-white' : 'bg-stone-50 border-stone-200 text-stone-500'">
+                                    {{ m.name }}
+                                </button>
+                            </div>
+                        </div>
+
+                        <div v-if="newExpense.expenseType !== 'personal' && (newExpense.splitMethod === 'customAmount' || newExpense.splitMethod === 'customPercent') && newExpense.splitAmongMemberIds.length"
+                            class="space-y-1.5 bg-stone-50 rounded-xl p-3 border border-stone-100">
+                            <div v-for="id in newExpense.splitAmongMemberIds" :key="id" class="flex items-center justify-between gap-2">
+                                <span class="text-xs font-bold text-stone-600">{{ memberNameById(id) }}</span>
+                                <div class="flex items-center gap-1">
+                                    <input v-model.number="newExpense.customSplits[id]" type="number" inputmode="decimal"
+                                        class="w-24 bg-white border border-stone-200 rounded-lg text-sm text-right font-mono px-2 py-1 focus:ring-2 focus:ring-primary-100">
+                                    <span class="text-xs text-stone-400 w-8">{{ newExpense.splitMethod === 'customPercent' ? '%' : newExpense.currency }}</span>
+                                </div>
+                            </div>
+                            <div class="text-[11px] font-bold pt-1 border-t border-stone-200"
+                                :class="Math.abs(customSplitRemaining(newExpense)) > 0.01 ? 'text-red-500' : 'text-emerald-600'">
+                                {{ Math.abs(customSplitRemaining(newExpense)) > 0.01 ? `尚差 ${customSplitRemaining(newExpense)}${newExpense.splitMethod === 'customPercent' ? '%' : ''}` : '總和已對齊' }}
+                            </div>
+                        </div>
+
+                        <div>
+                            <div class="text-[10px] text-stone-500 mb-1 pl-1">備註</div>
+                            <input v-model="newExpense.notes" type="text" placeholder="備註（可選）"
+                                class="w-full bg-stone-50 border-none rounded-xl text-sm text-stone-700 py-2.5 px-3 focus:ring-2 focus:ring-primary-200">
+                        </div>
+
+                        <button @click="addExpense"
+                            class="w-full py-3 bg-primary-500 text-white rounded-xl font-bold shadow-lg shadow-primary-500/30 hover:bg-primary-600 active:scale-95 transition flex items-center justify-center gap-2">
+                            <i class="ph-bold ph-plus text-xl"></i> 新增支出
+                        </button>
                     </div>
 
-                    <div class="space-y-3">
-                        <div v-for="exp in expenses" :key="exp.id || exp.item"
-                            class="bg-white rounded-2xl border border-stone-100 shadow-sm transition-all overflow-hidden">
-                            <!-- 點一下開彈窗編輯 -->
-                            <div @click="openExpModal(exp)"
-                                class="flex justify-between items-center p-4 cursor-pointer active:bg-stone-50">
-                                <div class="flex items-center gap-3 min-w-0">
-                                    <div
-                                        class="w-10 h-10 rounded-full bg-primary-50 flex items-center justify-center border border-primary-100 overflow-hidden shrink-0">
-                                        <span class="text-sm font-black text-primary-600">{{ (exp.payer ||
-                                            '?').charAt(0) }}</span>
+                    <!-- 需求 B2：共同帳本——所有 shared 支出，所有旅伴都看得到（共同分攤的錢需要彼此核對，避免誤植） -->
+                    <div>
+                        <h3 class="text-sm font-black text-stone-700 px-1 mb-2 flex items-center gap-1.5">
+                            <i class="ph-bold ph-users-three text-primary-500"></i> 共同帳本
+                        </h3>
+                        <div v-if="!sharedExpensesList.length" class="text-xs text-stone-400 px-1 pb-1">目前沒有共同支出</div>
+                        <div class="space-y-3">
+                            <div v-for="exp in sharedExpensesList" :key="exp.id"
+                                class="bg-white rounded-2xl border border-stone-100 shadow-sm transition-all overflow-hidden">
+                                <div @click="openExpModal(exp)" class="p-4 cursor-pointer active:bg-stone-50 space-y-2">
+                                    <div class="flex justify-between items-start gap-3">
+                                        <div class="flex items-center gap-3 min-w-0">
+                                            <div class="w-10 h-10 rounded-full bg-primary-50 flex items-center justify-center border border-primary-100 overflow-hidden shrink-0">
+                                                <i :class="expenseCategoryIcon(exp.category)" class="text-primary-500"></i>
+                                            </div>
+                                            <div class="min-w-0">
+                                                <div class="font-bold text-stone-700 truncate">{{ exp.title }}</div>
+                                                <div class="text-[11px] text-stone-400 flex items-center gap-1.5 flex-wrap">
+                                                    <span class="bg-stone-100 text-stone-500 px-1.5 py-0.5 rounded-full">{{ expenseCategoryLabel(exp.category) }}</span>
+                                                    <span v-if="exp.createdAt">{{ fmtExpDate(exp.createdAt.slice(0, 10)) }}</span>
+                                                    <span v-if="exp.sourceBookingId" class="text-primary-400">・來自訂位</span>
+                                                </div>
+                                            </div>
+                                        </div>
+                                        <div class="flex items-start gap-2 shrink-0">
+                                            <div class="text-right">
+                                                <div class="font-mono font-bold text-stone-800 text-lg">{{ symbolForCurrency(exp.currency) }}{{
+                                                    Number(exp.amount || 0).toLocaleString() }}</div>
+                                                <div v-if="exp.currency && exp.currency !== 'TWD' && !expenseNeedsRate(exp)" class="text-[10px] text-stone-400">
+                                                    匯率 1{{ exp.currency }}≈NT${{ fmtMoney(exp.exchangeRateToTWD) }}｜約合台幣 NT${{ fmtMoney(expenseAmountTWD(exp)) }}
+                                                    <span v-if="exp.exchangeRateSource === 'manual'" class="text-amber-600 font-bold">manual</span>
+                                                </div>
+                                                <div v-else-if="expenseNeedsRate(exp)" class="text-[10px] text-amber-600 font-bold">缺少匯率，請補齊</div>
+                                            </div>
+                                            <i class="ph-bold ph-pencil-simple text-stone-300 mt-1"></i>
+                                        </div>
                                     </div>
-                                    <div class="min-w-0">
-                                        <div class="font-bold text-stone-700 truncate">{{ exp.item }}</div>
-                                        <div class="text-xs text-stone-400">{{ exp.payer }}<span v-if="exp.date"> ・ {{
-                                            fmtExpDate(exp.date) }}</span></div>
+                                    <div class="text-xs text-stone-500 pl-[3.25rem] space-y-0.5">
+                                        <div>付款：{{ memberNameById(exp.paidByMemberId) || '未指定付款人' }}</div>
+                                        <div>分攤（{{ splitMethodLabel(exp.splitMethod) }}）：{{ (exp.splitAmongMemberIds || []).map(memberNameById).filter(Boolean).join('、') || '—' }}</div>
+                                        <div v-if="currentMemberId" class="font-bold text-primary-600">我應分攤：{{ symbolForCurrency(exp.currency) }}{{ fmtMoney(expenseMemberShares(exp)[currentMemberId] || 0) }}</div>
+                                        <div v-if="exp.notes" class="text-stone-400 truncate">備註：{{ exp.notes }}</div>
                                     </div>
-                                </div>
-                                <div class="flex items-center gap-2 shrink-0">
-                                    <span class="font-mono font-bold text-stone-800 text-lg">{{ currencySymbol }}{{
-                                        exp.amount.toLocaleString() }}</span>
-                                    <i class="ph-bold ph-pencil-simple text-stone-300"></i>
                                 </div>
                             </div>
                         </div>
                     </div>
+
+                    <!-- 需求 B4：與我有關的代付/被代付——只顯示付款人或被代付人是我自己的那些 -->
+                    <div v-if="myReimbursementExpensesList.length">
+                        <h3 class="text-sm font-black text-stone-700 px-1 mb-2 flex items-center gap-1.5">
+                            <i class="ph-bold ph-hand-coins text-primary-500"></i> 與我有關的代付
+                        </h3>
+                        <div class="space-y-3">
+                            <div v-for="exp in myReimbursementExpensesList" :key="exp.id"
+                                class="bg-white rounded-2xl border border-stone-100 shadow-sm transition-all overflow-hidden">
+                                <div @click="openExpModal(exp)" class="p-4 cursor-pointer active:bg-stone-50 space-y-2">
+                                    <div class="flex justify-between items-start gap-3">
+                                        <div class="flex items-center gap-3 min-w-0">
+                                            <div class="w-10 h-10 rounded-full bg-primary-50 flex items-center justify-center border border-primary-100 overflow-hidden shrink-0">
+                                                <i :class="expenseCategoryIcon(exp.category)" class="text-primary-500"></i>
+                                            </div>
+                                            <div class="min-w-0">
+                                                <div class="font-bold text-stone-700 truncate">{{ exp.title }}</div>
+                                                <div class="text-[11px] text-stone-400 flex items-center gap-1.5 flex-wrap">
+                                                    <span class="bg-stone-100 text-stone-500 px-1.5 py-0.5 rounded-full">{{ expenseCategoryLabel(exp.category) }}</span>
+                                                    <span v-if="exp.createdAt">{{ fmtExpDate(exp.createdAt.slice(0, 10)) }}</span>
+                                                </div>
+                                            </div>
+                                        </div>
+                                        <div class="flex items-start gap-2 shrink-0">
+                                            <div class="text-right">
+                                                <div class="font-mono font-bold text-stone-800 text-lg">{{ symbolForCurrency(exp.currency) }}{{
+                                                    Number(exp.amount || 0).toLocaleString() }}</div>
+                                                <div v-if="exp.currency && exp.currency !== 'TWD' && !expenseNeedsRate(exp)" class="text-[10px] text-stone-400">
+                                                    匯率 1{{ exp.currency }}≈NT${{ fmtMoney(exp.exchangeRateToTWD) }}｜約合台幣 NT${{ fmtMoney(expenseAmountTWD(exp)) }}
+                                                </div>
+                                                <div v-else-if="expenseNeedsRate(exp)" class="text-[10px] text-amber-600 font-bold">缺少匯率，請補齊</div>
+                                            </div>
+                                            <i class="ph-bold ph-pencil-simple text-stone-300 mt-1"></i>
+                                        </div>
+                                    </div>
+                                    <div class="text-xs text-stone-500 pl-[3.25rem] space-y-0.5">
+                                        <div>付款：{{ memberNameById(exp.paidByMemberId) || '未指定付款人' }}</div>
+                                        <div>代付對象：{{ (exp.splitAmongMemberIds || []).map(memberNameById).filter(Boolean).join('、') || '—' }}（{{ splitMethodLabel(exp.splitMethod) }}）</div>
+                                        <div v-if="currentMemberId && exp.paidByMemberId === currentMemberId" class="font-bold text-amber-600">我幫別人墊付，不算進我的旅程花費</div>
+                                        <div v-else-if="currentMemberId" class="font-bold text-primary-600">別人幫我付的，我應分攤：{{ symbolForCurrency(exp.currency) }}{{ fmtMoney(expenseMemberShares(exp)[currentMemberId] || 0) }}</div>
+                                        <div v-if="exp.notes" class="text-stone-400 truncate">備註：{{ exp.notes }}</div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- 需求 B3：我的個人支出——只顯示 currentMemberId 自己的，不顯示旅伴的個人支出 -->
+                    <div v-if="myPersonalExpensesList.length">
+                        <h3 class="text-sm font-black text-stone-700 px-1 mb-2 flex items-center gap-1.5">
+                            <i class="ph-bold ph-user text-primary-500"></i> 我的個人支出
+                        </h3>
+                        <div class="space-y-3">
+                            <div v-for="exp in myPersonalExpensesList" :key="exp.id"
+                                class="bg-white rounded-2xl border border-stone-100 shadow-sm transition-all overflow-hidden">
+                                <div @click="openExpModal(exp)" class="p-4 cursor-pointer active:bg-stone-50 space-y-2">
+                                    <div class="flex justify-between items-start gap-3">
+                                        <div class="flex items-center gap-3 min-w-0">
+                                            <div class="w-10 h-10 rounded-full bg-primary-50 flex items-center justify-center border border-primary-100 overflow-hidden shrink-0">
+                                                <i :class="expenseCategoryIcon(exp.category)" class="text-primary-500"></i>
+                                            </div>
+                                            <div class="min-w-0">
+                                                <div class="font-bold text-stone-700 truncate">{{ exp.title }}</div>
+                                                <div class="text-[11px] text-stone-400 flex items-center gap-1.5 flex-wrap">
+                                                    <span class="bg-stone-100 text-stone-500 px-1.5 py-0.5 rounded-full">{{ expenseCategoryLabel(exp.category) }}</span>
+                                                    <span v-if="exp.createdAt">{{ fmtExpDate(exp.createdAt.slice(0, 10)) }}</span>
+                                                </div>
+                                            </div>
+                                        </div>
+                                        <div class="flex items-start gap-2 shrink-0">
+                                            <div class="text-right">
+                                                <div class="font-mono font-bold text-stone-800 text-lg">{{ symbolForCurrency(exp.currency) }}{{
+                                                    Number(exp.amount || 0).toLocaleString() }}</div>
+                                                <div v-if="exp.currency && exp.currency !== 'TWD' && !expenseNeedsRate(exp)" class="text-[10px] text-stone-400">
+                                                    匯率 1{{ exp.currency }}≈NT${{ fmtMoney(exp.exchangeRateToTWD) }}｜約合台幣 NT${{ fmtMoney(expenseAmountTWD(exp)) }}
+                                                </div>
+                                                <div v-else-if="expenseNeedsRate(exp)" class="text-[10px] text-amber-600 font-bold">缺少匯率，請補齊</div>
+                                            </div>
+                                            <i class="ph-bold ph-pencil-simple text-stone-300 mt-1"></i>
+                                        </div>
+                                    </div>
+                                    <div class="text-xs text-stone-500 pl-[3.25rem] space-y-0.5">
+                                        <div class="text-stone-400">個人支出，不進共同分帳</div>
+                                        <div v-if="exp.notes" class="text-stone-400 truncate">備註：{{ exp.notes }}</div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- 需求 B5：全體結算——保留，收合在下方，展開才看得到所有人的 paid/share/net -->
+                    <div class="bg-white rounded-3xl border border-stone-100 shadow-sm overflow-hidden">
+                        <button @click="showOverallSettlement = !showOverallSettlement" type="button"
+                            class="w-full flex items-center justify-between px-4 py-3.5">
+                            <span class="text-sm font-black text-stone-700 flex items-center gap-1.5">
+                                <i class="ph-bold ph-chart-pie-slice text-primary-500"></i> 全體結算
+                            </span>
+                            <i class="ph-bold" :class="showOverallSettlement ? 'ph-caret-up' : 'ph-caret-down'"></i>
+                        </button>
+                        <div v-if="showOverallSettlement && visibleExpenses.length" class="px-4 pb-4 space-y-3 border-t border-stone-100 pt-3">
+                            <!-- 1. 我的總支出 = 我需共同分攤的花費 + 我的個人花費（見 app.js 的 calculateMemberTripCost）。
+                                 不再另外顯示「共同總支出」整筆金額——那是全員的錢，不是「我的」總支出，容易被誤讀成花費暴增。 -->
+                            <div class="bg-stone-50 p-3 rounded-2xl border border-stone-100 space-y-1">
+                                <div class="text-[11px] font-bold text-stone-500 mb-1">我的總支出</div>
+                                <div v-if="myTripTotalByCurrencyList.length">
+                                    <div v-for="g in myTripTotalByCurrencyList" :key="'a-' + g.currency" class="flex justify-between text-sm">
+                                        <span class="text-stone-500">{{ g.currency }}</span>
+                                        <span class="font-bold text-stone-700 font-mono">{{ symbolForCurrency(g.currency) }}{{ fmtMoney(g.total) }}</span>
+                                    </div>
+                                </div>
+                                <div v-if="expensesMissingRate.length" class="text-[11px] text-amber-600 font-bold">{{ expensesMissingRate.length }} 筆缺少匯率，未計入台幣總額</div>
+                                <div class="flex justify-between items-baseline text-sm pt-1.5 mt-1 border-t border-stone-200">
+                                    <span class="text-stone-500">約合台幣</span>
+                                    <span class="font-black text-primary-700 font-mono text-base">NT${{ fmtMoney(myTripCost.myTripTotalTWD) }}</span>
+                                </div>
+                                <div class="text-[11px] text-stone-500 space-y-0.5 pt-1">
+                                    <div v-for="cur in Object.keys(myTripCost.personalExpensesTotalByCurrency)" :key="'p-' + cur" class="flex justify-between">
+                                        <span>我的個人花費</span>
+                                        <span class="font-mono">{{ symbolForCurrency(cur) }}{{ fmtMoney(myTripCost.personalExpensesTotalByCurrency[cur]) }}</span>
+                                    </div>
+                                    <div v-for="cur in Object.keys(myTripCost.sharedShareTotalByCurrency)" :key="'s-' + cur" class="flex justify-between">
+                                        <span>我需共同分攤的花費</span>
+                                        <span class="font-mono">{{ symbolForCurrency(cur) }}{{ fmtMoney(myTripCost.sharedShareTotalByCurrency[cur]) }}</span>
+                                    </div>
+                                    <div v-for="cur in Object.keys(myTripCost.reimbursementRelatedTotalByCurrency)" :key="'r-' + cur" class="flex justify-between">
+                                        <span>與我有關的代付</span>
+                                        <span class="font-mono">{{ symbolForCurrency(cur) }}{{ fmtMoney(myTripCost.reimbursementRelatedTotalByCurrency[cur]) }}</span>
+                                    </div>
+                                </div>
+                                <div v-if="mySecondaryReferenceTotal !== null" class="flex justify-between text-[11px] text-stone-400 pt-1">
+                                    <span>約合 {{ setup.currency }}（次要參考）</span>
+                                    <span class="font-mono">{{ symbolForCurrency(setup.currency) }}{{ fmtMoney(mySecondaryReferenceTotal) }}</span>
+                                </div>
+                            </div>
+
+                            <!-- 2. 每位成員總覽：只算純共同支出（shared），不含 reimbursement／個人支出——
+                                 這個表格所有旅伴都看得到，代付是只有當事人才看得到的私下約定，不能出現在這裡 -->
+                            <div v-for="m in activeMembers" :key="m.id" class="bg-stone-50 p-3 rounded-2xl border border-stone-100 space-y-1">
+                                <div class="flex items-center justify-between gap-2">
+                                    <span class="text-sm font-bold text-stone-700 truncate">{{ m.name }}</span>
+                                    <span class="text-sm font-black shrink-0" :class="(sharedOnlyNetTWD[m.id] || 0) >= 0 ? 'text-emerald-600' : 'text-red-500'">
+                                        淨額 {{ (sharedOnlyNetTWD[m.id] || 0) >= 0 ? '+' : '' }}NT${{ fmtMoney(sharedOnlyNetTWD[m.id] || 0) }}
+                                    </span>
+                                </div>
+                                <div v-for="g in sharedOnlySettlementByCurrency" :key="g.currency" class="text-[11px] text-stone-500">
+                                    {{ g.currency }}｜已付 {{ symbolForCurrency(g.currency) }}{{ fmtMoney(g.paid[m.id] || 0) }} ・ 應分攤 {{ symbolForCurrency(g.currency) }}{{ fmtMoney(g.share[m.id] || 0) }}
+                                </div>
+                            </div>
+
+                            <!-- 3+4. 誰欠誰，依幣別分開顯示（USD 結算 / TWD 結算…），不同幣別的債務不能互相抵銷 -->
+                            <template v-for="g in settlementByCurrency" :key="'transfer-' + g.currency">
+                                <div v-if="g.transfers.length" class="space-y-1.5">
+                                    <div class="text-[10px] text-stone-400 font-bold pl-1 uppercase tracking-wider">{{ g.currency }} 結算</div>
+                                    <div v-for="(t, i) in g.transfers" :key="i"
+                                        class="text-sm font-bold text-primary-700 bg-primary-50 border border-primary-100 rounded-xl px-3 py-2 flex items-center gap-1.5">
+                                        <i class="ph-bold ph-arrow-right"></i> {{ t.from }} 需付給 {{ t.to }} {{ symbolForCurrency(g.currency) }}{{ fmtMoney(t.amount) }}
+                                    </div>
+                                </div>
+                            </template>
+                            <div v-if="!settlementByCurrency.some(g => g.transfers.length)" class="text-xs text-stone-400 pl-1">目前帳務已結清，沒有人需要轉帳。</div>
+                            <!-- 需求 F/G：多幣別 settlement 分開顯示之外，額外提供一個約合台幣的參考總額（僅供參考，不是轉帳依據） -->
+                            <div class="text-[11px] text-stone-400 pl-1">合計約合台幣 NT${{ fmtMoney(twdSummary.total) }}</div>
+                        </div>
+                        <div v-else-if="showOverallSettlement" class="px-4 pb-4 text-xs text-stone-400 border-t border-stone-100 pt-3">目前還沒有任何支出</div>
+                    </div>
+                    </template>
                 </div>
 
                 <div v-else-if="viewMode === 'conference'" key="conference"
@@ -1580,18 +1967,25 @@
                                                 <div class="text-[11px] mt-0.5 font-medium text-stone-400">{{ t.startDate
                                                     }} • {{ t.daysCount }} 天</div>
                                             </div>
-                                            <button @click="unarchiveTrip(t)"
-                                                class="shrink-0 px-3 py-1.5 bg-white text-primary-500 border border-primary-200 rounded-full text-xs font-bold hover:bg-primary-50 transition">取回</button>
+                                            <div class="shrink-0 flex items-center gap-1.5">
+                                                <button @click="unarchiveTrip(t)"
+                                                    class="px-3 py-1.5 bg-white text-primary-500 border border-primary-200 rounded-full text-xs font-bold hover:bg-primary-50 transition">取回</button>
+                                                <button @click="deleteArchivedTrip(t)" aria-label="永久刪除旅程"
+                                                    class="w-8 h-8 flex items-center justify-center rounded-full text-stone-300 hover:bg-red-50 hover:text-red-500 transition">
+                                                    <i class="ph-bold ph-trash"></i>
+                                                </button>
+                                            </div>
                                         </div>
                                     </div>
                                 </div>
                             </template>
                         </div>
                     </div>
-                    <!-- 打包清單身份：只影響自己裝置看到的勾選進度，不會顯示或動到旅伴的清單 -->
+                    <!-- 身份（打包清單＋記帳共用）：切換這裡同時決定打包清單的勾選進度視角，以及記帳頁的
+                         「我的總覽」「我的個人支出」要顯示誰的內容——兩個功能刻意共用同一套身份，不用選兩次 -->
                     <div v-if="currentTripId && checklistMembers.length > 1" class="mt-4 pt-4 border-t border-stone-100">
-                        <h3 class="text-xs font-black text-stone-400 tracking-wide mb-1">打包清單身份</h3>
-                        <p class="text-[10px] text-stone-400 mb-2">切換後只影響你自己看到的打包清單勾選進度</p>
+                        <h3 class="text-xs font-black text-stone-400 tracking-wide mb-1">身份（打包清單／記帳視角）</h3>
+                        <p class="text-[10px] text-stone-400 mb-2">切換後只影響你自己看到的打包清單勾選進度、記帳頁的個人開銷與總覽</p>
                         <div class="flex flex-wrap gap-2">
                             <button v-for="m in checklistMembers" :key="m" @click="chooseChecklistMember(m)"
                                 class="px-3 py-1.5 rounded-full text-xs font-bold border transition"
@@ -1836,7 +2230,7 @@
                                         <span v-else-if="type==='food'">🍴</span>
                                         <span v-else-if="type==='shop'">🛍️</span>
                                         <span v-else-if="type==='transport'">🚇</span>
-                                        <span v-else-if="type==='hotel'">🏨</span>
+                                        <span v-else-if="type==='hotel'">🛏️</span>
                                         <span v-else-if="type==='conference'">🎤</span>
                                     </button>
                                 </div>
@@ -1883,6 +2277,136 @@
             </div>
         </transition>
 
+        <!-- ===== 匯入行程文字彈窗 ===== -->
+        <transition name="sheet">
+            <div v-if="textImportModal.show" class="sheet-host absolute inset-x-0 top-0 z-[70] flex items-end justify-center">
+                <div class="absolute inset-0 bg-stone-900/40 backdrop-blur-sm" @click="closeTextImportModal"></div>
+                <div class="sheet-panel relative z-10 w-full bg-white rounded-t-[2rem] shadow-2xl max-h-[85%] overflow-y-auto hide-scroll"
+                    style="padding-bottom: calc(1.25rem + env(safe-area-inset-bottom))">
+                    <div class="sticky top-0 bg-white/95 backdrop-blur-sm px-5 pt-4 pb-3 border-b border-stone-100 z-10">
+                        <div class="w-10 h-1 bg-stone-200 rounded-full mx-auto mb-3"></div>
+                        <div class="flex items-center justify-between">
+                            <h3 class="text-lg font-black text-stone-800">{{ textImportModal.step === 'preview' ? '匯入預覽' : '匯入行程文字' }}</h3>
+                            <button @click="closeTextImportModal" aria-label="取消並關閉"
+                                class="w-9 h-9 rounded-full bg-stone-100 text-stone-500 flex items-center justify-center hover:bg-stone-200 transition">
+                                <i class="ph-bold ph-x"></i>
+                            </button>
+                        </div>
+                    </div>
+
+                    <!-- Step 1：貼上文字 -->
+                    <div v-if="textImportModal.step === 'paste'" class="p-5 space-y-3">
+                        <p class="text-xs text-stone-500 leading-relaxed">
+                            沒有現成的行程文字？複製下面的提示詞貼給你的 AI（ChatGPT／Claude…），請它照這個格式生成行程，再把結果貼到下方文字框——系統會嘗試解析，確認後才會真的加入。
+                        </p>
+                        <div class="bg-stone-50 border border-stone-200 rounded-xl p-3 space-y-2">
+                            <pre class="text-[11px] text-stone-600 leading-relaxed whitespace-pre-wrap font-mono">{{ TEXT_IMPORT_PROMPT }}</pre>
+                            <button @click="copyTextImportPrompt" type="button"
+                                class="w-full py-2 bg-white border border-stone-200 text-stone-600 rounded-lg text-xs font-bold hover:bg-stone-100 hover:border-primary-200 transition flex items-center justify-center gap-1.5">
+                                <i class="ph-bold ph-copy"></i> 複製提示詞
+                            </button>
+                        </div>
+                        <textarea v-model="textImportModal.text" rows="10"
+                            class="w-full bg-stone-50 border border-stone-200 rounded-xl p-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary-100 resize-none font-mono"
+                            placeholder="去程｜Taipei → San Diego
+BR08｜TPE 10:15 → SFO 06:35
+轉機 4 小時 05 分鐘
+AS740｜SFO 10:40 → SAN 12:23
+
+2026/10/16
+09:00 ASA registration
+18:30 Dinner"></textarea>
+                        <button @click="previewTextImport"
+                            class="w-full py-3 bg-primary-600 text-white rounded-xl text-sm font-bold hover:bg-primary-700 transition active:scale-95 flex items-center justify-center gap-2">
+                            <i class="ph-bold ph-magic-wand"></i> 解析並預覽
+                        </button>
+                    </div>
+
+                    <!-- Step 2：匯入預覽（分成 A. 航班資訊 / B. 行程 兩區） -->
+                    <div v-else class="p-5 space-y-4">
+
+                        <!-- 無法完整解析的航班文字：不會產生任何行程碎片，只顯示提示 -->
+                        <div v-for="(warn, wIdx) in textImportModal.flightParseWarnings" :key="'warn'+wIdx"
+                            class="flex items-start gap-2 bg-red-50 border border-red-100 text-red-600 rounded-xl px-3 py-2.5 text-xs font-bold">
+                            <i class="ph-bold ph-warning-circle mt-0.5 shrink-0"></i>
+                            <span>{{ warn }}</span>
+                        </div>
+
+                        <!-- A. 將匯入到航班資訊 -->
+                        <div v-if="textImportModal.flightJourneys.length" class="space-y-2">
+                            <div class="flex items-center justify-between text-xs gap-2">
+                                <span class="font-bold text-stone-700 flex items-center gap-1.5">
+                                    <i class="ph-bold ph-airplane-tilt text-primary-500"></i>
+                                    A. 將匯入到航班資訊（{{ textImportModal.flightJourneys.filter(j => j.include).length }} / {{ textImportModal.flightJourneys.length }}）
+                                </span>
+                                <button @click="toggleAllFlightJourneys" class="text-primary-600 font-bold shrink-0">全選 / 取消全選</button>
+                            </div>
+                            <div class="space-y-2">
+                                <div v-for="j in textImportModal.flightJourneys" :key="j._journeyId"
+                                    class="rounded-xl border p-3 space-y-2"
+                                    :class="j.duplicate ? 'border-amber-200 bg-amber-50' : 'border-primary-100 bg-primary-50/40'">
+                                    <label class="flex items-start gap-2 text-sm font-bold text-stone-800">
+                                        <input type="checkbox" v-model="j.include" class="mt-1 w-4 h-4 accent-primary-600 shrink-0">
+                                        <span>{{ j.journeyName || '未命名航程' }}</span>
+                                    </label>
+                                    <div v-if="j.duplicate" class="text-[11px] text-amber-600 font-bold pl-6">偵測到可能重複的航班段，請確認是否仍要匯入</div>
+                                    <div v-if="j.incomplete" class="text-[11px] text-amber-600 font-bold pl-6">此航班文字解析可能不完整，匯入後請到訂位頁確認並補齊</div>
+                                    <div v-if="j.dateInferred" class="text-[11px] text-amber-600 font-bold pl-6">⚠️ 部分日期由系統推測，請確認後再匯入。</div>
+                                    <div class="pl-6 space-y-1.5">
+                                        <template v-for="(seg, idx) in j.segments" :key="idx">
+                                            <div class="text-xs font-mono text-stone-700">
+                                                {{ seg.flightNumber || '航班未定' }}<span v-if="seg.airline" class="text-stone-400">（{{ seg.airline }}）</span>｜{{ seg.departureAirport || '?' }}<span v-if="seg.departureTerminal" class="text-stone-400"> T{{ seg.departureTerminal }}</span> {{ seg.departureTime || '--:--' }} → {{ seg.arrivalAirport || '?' }}<span v-if="seg.arrivalTerminal" class="text-stone-400"> T{{ seg.arrivalTerminal }}</span> {{ seg.arrivalTime || '--:--' }}<span v-if="seg.departureDate" class="text-stone-400">（{{ seg.departureDate }}）</span>
+                                            </div>
+                                            <div v-if="idx < j.segments.length - 1" class="text-[11px] font-bold text-amber-700 bg-amber-50 rounded-full py-0.5 px-3 inline-block">
+                                                {{ bookingLayover(seg, j.segments[idx + 1]) }}
+                                            </div>
+                                        </template>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- B. 將匯入到行程 -->
+                        <div v-if="textImportModal.items.length" class="space-y-2">
+                            <div class="flex items-center justify-between text-xs gap-2">
+                                <span class="font-bold text-stone-700 flex items-center gap-1.5">
+                                    <i class="ph-bold ph-calendar-check text-primary-500"></i>
+                                    B. 將匯入到行程（{{ textImportModal.items.filter(i => i.include).length }} / {{ textImportModal.items.length }}）
+                                </span>
+                                <button @click="toggleAllImportRows" class="text-primary-600 font-bold shrink-0">全選 / 取消全選</button>
+                            </div>
+                            <div class="space-y-2 max-h-[40vh] overflow-y-auto hide-scroll pr-1">
+                                <div v-for="row in textImportModal.items" :key="row._rowId"
+                                    class="rounded-xl border p-3 flex items-start gap-3"
+                                    :class="row.outOfRange ? 'border-stone-100 bg-stone-50 opacity-60' : (row.duplicate ? 'border-amber-200 bg-amber-50' : 'border-stone-100 bg-white')">
+                                    <input type="checkbox" v-model="row.include" :disabled="row.outOfRange" class="mt-1.5 w-4 h-4 accent-primary-600 shrink-0">
+                                    <div class="flex-1 min-w-0 space-y-1">
+                                        <div class="flex items-center gap-2 text-xs font-bold text-stone-500">
+                                            <span class="truncate">{{ row.dayLabel }}</span>
+                                            <span v-if="row.time" class="font-mono text-stone-700 shrink-0">{{ row.time }}</span>
+                                            <span v-else class="text-stone-400 shrink-0">全天</span>
+                                            <span class="ml-auto bg-stone-100 text-stone-600 px-2 py-0.5 rounded-full shrink-0">{{ itemTypeLabel(row.type) }}</span>
+                                        </div>
+                                        <div class="text-sm font-bold text-stone-800 break-words">{{ row.title }}</div>
+                                        <div v-if="row.outOfRange" class="text-[11px] text-red-500 font-bold">日期不在目前行程範圍內，將略過</div>
+                                        <div v-else-if="row.duplicate" class="text-[11px] text-amber-600 font-bold">偵測到可能重複，預設不匯入</div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="flex items-center gap-2 pt-2 border-t border-stone-50">
+                            <button @click="backToPasteStep" class="px-4 py-2.5 rounded-xl text-xs font-bold text-stone-500 hover:bg-stone-100 transition">上一步</button>
+                            <button @click="confirmTextImport"
+                                class="flex-1 py-2.5 bg-primary-600 text-white rounded-xl text-sm font-bold hover:bg-primary-700 transition active:scale-95 flex items-center justify-center gap-2">
+                                <i class="ph-bold ph-check"></i> 確認匯入
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </transition>
+
         <!-- ===== 口袋名單編輯彈窗 ===== -->
         <transition name="sheet">
             <div v-if="locModal.show" class="sheet-host absolute inset-x-0 top-0 z-[70] flex items-end justify-center">
@@ -1915,7 +2439,7 @@
                                     <span v-else-if="type==='food'">🍴</span>
                                     <span v-else-if="type==='shop'">🛍️</span>
                                     <span v-else-if="type==='transport'">🚇</span>
-                                    <span v-else-if="type==='hotel'">🏨</span>
+                                    <span v-else-if="type==='hotel'">🛏️</span>
                                     <span v-else-if="type==='conference'">🎤</span>
                                 </button>
                             </div>
@@ -1956,7 +2480,10 @@
                     <div class="sticky top-0 bg-white/95 backdrop-blur-sm px-5 pt-4 pb-3 border-b border-stone-100 z-10">
                         <div class="w-10 h-1 bg-stone-200 rounded-full mx-auto mb-3"></div>
                         <div class="flex items-center justify-between">
-                            <h3 class="text-lg font-black text-stone-800">編輯支出</h3>
+                            <h3 class="text-lg font-black text-stone-800 flex items-center gap-2">
+                                編輯支出
+                                <span v-if="expModal.draft" class="text-[10px] font-bold px-2 py-0.5 rounded-full bg-primary-50 text-primary-600">{{ expenseKindLabel(expenseKind(expModal.draft)) }}</span>
+                            </h3>
                             <button @click="expModal.show = false" aria-label="取消並關閉"
                                 class="w-9 h-9 rounded-full bg-stone-100 text-stone-500 flex items-center justify-center hover:bg-stone-200 transition">
                                 <i class="ph-bold ph-x"></i>
@@ -1965,26 +2492,126 @@
                     </div>
 
                     <div v-if="expModal.draft" class="p-5 space-y-4">
-                        <input v-model="expModal.draft.item" placeholder="項目"
+                        <div v-if="expModal.conflictWith" class="bg-amber-50 border border-amber-200 text-amber-700 text-xs font-bold rounded-xl p-3 space-y-2">
+                            <div>這筆支出已被其他人更新，請選擇要載入對方的版本，還是用目前這份覆蓋過去。</div>
+                            <div class="flex gap-2">
+                                <button @click="reloadExpModalFromConflict" class="flex-1 py-2 bg-white border border-amber-300 rounded-lg">載入最新版本</button>
+                                <button @click="overwriteExpModalConflict" class="flex-1 py-2 bg-amber-600 text-white rounded-lg">仍要覆蓋</button>
+                            </div>
+                        </div>
+                        <div v-if="expModal.errorMsg" class="bg-red-50 border border-red-200 text-red-600 text-xs font-bold rounded-xl p-3">
+                            {{ expModal.errorMsg }}
+                        </div>
+
+                        <input v-model="expModal.draft.title" placeholder="支出名稱"
                             class="w-full bg-stone-50 border-none rounded-xl text-base font-bold text-stone-700 py-2.5 px-3 focus:ring-2 focus:ring-primary-200">
+
+                        <div>
+                            <label class="text-[10px] font-bold text-stone-500 uppercase mb-1 block">類別</label>
+                            <div class="grid grid-cols-6 gap-1 bg-stone-50 p-1 rounded-xl border border-stone-200">
+                                <button v-for="cat in EXPENSE_CATEGORIES" :key="cat.slug" type="button" @click="expModal.draft.category = cat.slug"
+                                    class="rounded-lg flex flex-col items-center justify-center py-1.5 transition-colors"
+                                    :class="expModal.draft.category === cat.slug ? 'bg-white shadow-sm' : 'opacity-40 hover:opacity-100'">
+                                    <i :class="cat.icon" class="text-sm text-stone-600"></i>
+                                    <span class="text-[9px] font-bold text-stone-500 mt-0.5">{{ cat.label }}</span>
+                                </button>
+                            </div>
+                        </div>
+
                         <div class="flex gap-2">
-                            <select v-model="expModal.draft.payer"
-                                class="w-24 shrink-0 bg-stone-50 border-none rounded-xl text-sm font-bold text-stone-700 py-2.5 px-2 focus:ring-2 focus:ring-primary-200 appearance-none">
-                                <option v-for="p in participants" :value="p">{{ p }}</option>
-                            </select>
                             <input v-model.number="expModal.draft.amount" type="number" inputmode="decimal"
                                 :placeholder="currencySymbol"
                                 class="flex-1 bg-stone-50 border-none rounded-xl text-base font-black text-stone-700 py-2.5 px-3 focus:ring-2 focus:ring-primary-200 text-right font-mono">
+                            <select v-model="expModal.draft.currency" @change="applyFetchedRate(expModal.draft)"
+                                class="w-20 shrink-0 bg-stone-50 border-none rounded-xl text-sm font-bold text-stone-700 py-2.5 px-2 focus:ring-2 focus:ring-primary-200 appearance-none">
+                                <option v-for="c in currencyCodeOptions" :key="c" :value="c">{{ c }}</option>
+                            </select>
                         </div>
-                        <input v-model="expModal.draft.date" type="date"
-                            class="w-full bg-stone-50 border-none rounded-xl text-sm text-stone-600 py-2.5 px-3 focus:ring-2 focus:ring-primary-200">
+                        <div v-if="expModal.draft.currency && expModal.draft.currency !== 'TWD'">
+                            <label class="text-[10px] text-stone-400 font-bold block mb-1">換算成台幣的匯率（1 {{ expModal.draft.currency }} = ? TWD）</label>
+                            <div class="flex items-center gap-2">
+                                <input v-model.number="expModal.draft.exchangeRateToTWD" type="number" step="0.0001" inputmode="decimal"
+                                    class="flex-1 bg-stone-50 border-none rounded-xl text-sm text-stone-700 py-2.5 px-3 focus:ring-2 focus:ring-primary-200">
+                                <button type="button" @click="applyFetchedRate(expModal.draft)" title="更新此筆匯率（重新抓取，只影響這一筆支出）"
+                                    class="w-9 h-9 rounded-xl bg-stone-100 text-stone-500 flex items-center justify-center hover:bg-stone-200 active:scale-95 transition shrink-0">
+                                    <i class="ph-bold ph-arrows-clockwise" :class="{'animate-spin': expModal.draft.exchangeRateSource === 'loading'}"></i>
+                                </button>
+                            </div>
+                            <p class="text-[10px] mt-1" :class="expModal.draft.exchangeRateSource === 'manual' ? 'text-amber-600' : 'text-stone-400'">
+                                <span v-if="expModal.draft.exchangeRateSource === 'loading'">正在抓取即時匯率...</span>
+                                <span v-else-if="expModal.draft.exchangeRateSource === 'api'">
+                                    已自動抓取匯率，約合台幣 NT${{ fmtMoney((Number(expModal.draft.amount) || 0) * (Number(expModal.draft.exchangeRateToTWD) || 0)) }}
+                                    <span v-if="expModal.draft.exchangeRateFetchedAt">（{{ fmtExpDate(expModal.draft.exchangeRateFetchedAt.slice(0, 10)) }} 取得）</span>
+                                </span>
+                                <span v-else-if="Number(expModal.draft.exchangeRateToTWD) > 0">manual・手動輸入的匯率，約合台幣 NT${{ fmtMoney((Number(expModal.draft.amount) || 0) * (Number(expModal.draft.exchangeRateToTWD) || 0)) }}</span>
+                                <span v-else class="text-amber-600 font-bold">匯率取得失敗，請手動輸入匯率</span>
+                            </p>
+                            <p class="text-[9px] text-stone-300 mt-1">這筆支出的匯率是建立當下鎖定的快照，修改只會影響這一筆，不會重算其他歷史支出。</p>
+                        </div>
+
+                        <div>
+                            <label class="text-[10px] font-bold text-stone-500 uppercase mb-1 block">付款者</label>
+                            <select v-model="expModal.draft.paidByMemberId" @change="onExpensePayerChange(expModal.draft)"
+                                class="w-full bg-stone-50 border-none rounded-xl text-sm font-bold text-stone-700 py-2.5 px-2 focus:ring-2 focus:ring-primary-200 appearance-none">
+                                <option v-for="m in activeMembers" :key="m.id" :value="m.id">{{ m.name }}</option>
+                            </select>
+                        </div>
+
+                        <div>
+                            <label class="text-[10px] font-bold text-stone-500 uppercase mb-1 block">分攤方式</label>
+                            <div class="grid grid-cols-4 gap-1 bg-stone-50 p-1 rounded-xl border border-stone-200">
+                                <button v-for="method in SPLIT_METHODS" :key="method.slug" type="button" @click="setSplitMethod(expModal.draft, method.slug)"
+                                    class="rounded-lg py-1.5 text-[11px] font-bold transition-colors"
+                                    :class="expModal.draft.splitMethod === method.slug ? 'bg-white shadow-sm text-stone-700' : 'opacity-40 text-stone-500 hover:opacity-100'">
+                                    {{ method.label }}
+                                </button>
+                            </div>
+                        </div>
+
+                        <div v-if="expModal.draft.splitMethod !== 'personal'">
+                            <label class="text-[10px] font-bold text-stone-500 uppercase mb-1 block">幫誰付</label>
+                            <div class="flex flex-wrap gap-1.5">
+                                <button v-for="m in activeMembers" :key="m.id" type="button" @click="toggleSplitMember(expModal.draft, m.id)"
+                                    class="px-3 py-1.5 rounded-full text-xs font-bold border transition"
+                                    :class="expModal.draft.splitAmongMemberIds.includes(m.id) ? 'bg-primary-500 border-primary-500 text-white' : 'bg-stone-50 border-stone-200 text-stone-500'">
+                                    {{ m.name }}
+                                </button>
+                            </div>
+                        </div>
+                        <div v-else class="text-xs text-stone-400 bg-stone-50 rounded-xl px-3 py-2">個人支出：全額算在付款者自己頭上，不進共同分帳。</div>
+
+                        <div v-if="(expModal.draft.splitMethod === 'customAmount' || expModal.draft.splitMethod === 'customPercent') && expModal.draft.splitAmongMemberIds.length"
+                            class="space-y-1.5 bg-stone-50 rounded-xl p-3 border border-stone-100">
+                            <div v-for="id in expModal.draft.splitAmongMemberIds" :key="id" class="flex items-center justify-between gap-2">
+                                <span class="text-xs font-bold text-stone-600">{{ memberNameById(id) }}</span>
+                                <div class="flex items-center gap-1">
+                                    <input v-model.number="expModal.draft.customSplits[id]" type="number" inputmode="decimal"
+                                        class="w-24 bg-white border border-stone-200 rounded-lg text-sm text-right font-mono px-2 py-1 focus:ring-2 focus:ring-primary-100">
+                                    <span class="text-xs text-stone-400 w-8">{{ expModal.draft.splitMethod === 'customPercent' ? '%' : expModal.draft.currency }}</span>
+                                </div>
+                            </div>
+                            <div class="text-[11px] font-bold pt-1 border-t border-stone-200"
+                                :class="Math.abs(customSplitRemaining(expModal.draft)) > 0.01 ? 'text-red-500' : 'text-emerald-600'">
+                                {{ Math.abs(customSplitRemaining(expModal.draft)) > 0.01 ? `尚差 ${customSplitRemaining(expModal.draft)}${expModal.draft.splitMethod === 'customPercent' ? '%' : ''}` : '總和已對齊' }}
+                            </div>
+                        </div>
+
+                        <div>
+                            <label class="text-[10px] font-bold text-stone-500 uppercase mb-1 block">備註</label>
+                            <input v-model="expModal.draft.notes" placeholder="備註（可選）"
+                                class="w-full bg-stone-50 border-none rounded-xl text-sm text-stone-700 py-2.5 px-3 focus:ring-2 focus:ring-primary-200">
+                        </div>
+
+                        <div v-if="expModal.draft.sourceBookingId" class="text-[11px] text-primary-500 bg-primary-50 rounded-xl px-3 py-2">
+                            這筆支出是從訂位同步過來的，修改訂位費用/分攤設定會再次同步覆蓋這裡的內容。
+                        </div>
 
                         <div class="flex items-center justify-between pt-2 border-t border-stone-50">
                             <button @click="deleteExpFromModal"
                                 class="text-red-400 hover:text-red-500 hover:bg-red-50 px-3 py-2 rounded-lg text-xs font-bold transition flex items-center gap-1">
                                 <i class="ph-bold ph-trash"></i> 刪除
                             </button>
-                            <button @click="saveExpModal"
+                            <button @click="saveExpModal()"
                                 class="bg-primary-600 text-white px-6 py-2.5 rounded-xl font-bold shadow-md shadow-primary-200 hover:bg-primary-700 transition active:scale-95 flex items-center gap-2">
                                 <i class="ph-bold ph-check"></i> 儲存
                             </button>
@@ -2109,15 +2736,11 @@
                                     class="flex-1 min-w-0 text-sm font-medium bg-transparent focus:outline-none text-stone-700"
                                     placeholder="地點（可選）">
                             </div>
-                            <div class="grid grid-cols-2 gap-2">
-                                <select v-model="bookingModal.draft.bookedBy"
-                                    class="text-sm bg-stone-50 border border-stone-200 rounded-xl px-3 py-2.5 focus:ring-2 focus:ring-primary-100">
-                                    <option value="">誰訂的（可選）</option>
-                                    <option v-for="p in participants" :value="p">{{ p }}</option>
-                                </select>
-                                <input v-model="bookingModal.draft.cost" placeholder="費用（可選）"
-                                    class="text-sm bg-stone-50 border border-stone-200 rounded-xl px-3 py-2.5 focus:ring-2 focus:ring-primary-100">
-                            </div>
+                            <select v-model="bookingModal.draft.bookedBy"
+                                class="w-full text-sm bg-stone-50 border border-stone-200 rounded-xl px-3 py-2.5 focus:ring-2 focus:ring-primary-100">
+                                <option value="">誰訂的（可選）</option>
+                                <option v-for="p in participants" :value="p">{{ p }}</option>
+                            </select>
                             <div>
                                 <label class="text-[10px] font-bold text-stone-600 uppercase mb-1 block">確認碼</label>
                                 <input v-model="bookingModal.draft.confirmationNumber" placeholder="Confirmation Number"
@@ -2223,15 +2846,11 @@
                                     class="flex-1 min-w-0 text-sm font-medium bg-transparent focus:outline-none text-stone-700"
                                     placeholder="地點（可選）">
                             </div>
-                            <div class="grid grid-cols-2 gap-2">
-                                <select v-model="bookingModal.draft.bookedBy"
-                                    class="text-sm bg-stone-50 border border-stone-200 rounded-xl px-3 py-2.5 focus:ring-2 focus:ring-primary-100">
-                                    <option value="">誰訂的（可選）</option>
-                                    <option v-for="p in participants" :value="p">{{ p }}</option>
-                                </select>
-                                <input v-model="bookingModal.draft.cost" placeholder="費用（可選）"
-                                    class="text-sm bg-stone-50 border border-stone-200 rounded-xl px-3 py-2.5 focus:ring-2 focus:ring-primary-100">
-                            </div>
+                            <select v-model="bookingModal.draft.bookedBy"
+                                class="w-full text-sm bg-stone-50 border border-stone-200 rounded-xl px-3 py-2.5 focus:ring-2 focus:ring-primary-100">
+                                <option value="">誰訂的（可選）</option>
+                                <option v-for="p in participants" :value="p">{{ p }}</option>
+                            </select>
                             <div>
                                 <label class="text-[10px] font-bold text-stone-600 uppercase mb-1 block">確認碼 / 票券號碼</label>
                                 <input v-model="bookingModal.draft.confirmationNumber" placeholder="Confirmation Number"
@@ -2239,6 +2858,82 @@
                                 <p class="text-[10px] text-stone-400 mt-1">瀏覽時會預設遮蔽（••••••），要按「顯示」才會展開，不會直接出現在行程摘要上。</p>
                             </div>
                         </template>
+
+                        <!-- 費用 + 記帳/行程同步：所有 booking 類型共用（需求 B、C、D、E） -->
+                        <div class="bg-stone-50 rounded-xl p-3 space-y-2 border border-stone-100">
+                            <div class="text-[10px] font-bold text-stone-500 uppercase tracking-wider">費用與同步</div>
+                            <div class="grid grid-cols-3 gap-2">
+                                <input v-model="bookingModal.draft.cost" placeholder="費用（可選）" inputmode="decimal"
+                                    class="col-span-2 text-sm bg-white border border-stone-200 rounded-xl px-3 py-2.5 focus:ring-2 focus:ring-primary-100">
+                                <select v-model="bookingModal.draft.currency" @change="applyFetchedRate(bookingModal.draft)"
+                                    class="text-sm bg-white border border-stone-200 rounded-xl px-2 py-2.5 focus:ring-2 focus:ring-primary-100">
+                                    <option v-for="c in currencyCodeOptions" :key="c" :value="c">{{ c }}</option>
+                                </select>
+                            </div>
+                            <div v-if="bookingModal.draft.currency && bookingModal.draft.currency !== 'TWD'">
+                                <label class="text-[9px] text-stone-400 font-bold block mb-0.5">換算成台幣的匯率（1 {{ bookingModal.draft.currency }} = ? TWD）</label>
+                                <div class="flex items-center gap-2">
+                                    <input v-model.number="bookingModal.draft.exchangeRateToTWD" type="number" step="0.0001" inputmode="decimal"
+                                        class="flex-1 text-sm bg-white border border-stone-200 rounded-xl px-3 py-2 focus:ring-2 focus:ring-primary-100">
+                                    <button type="button" @click="applyFetchedRate(bookingModal.draft)" title="重新抓匯率"
+                                        class="w-9 h-9 rounded-xl bg-white border border-stone-200 text-stone-500 flex items-center justify-center hover:bg-stone-100 active:scale-95 transition shrink-0">
+                                        <i class="ph-bold ph-arrows-clockwise" :class="{'animate-spin': bookingModal.draft.exchangeRateSource === 'loading'}"></i>
+                                    </button>
+                                </div>
+                                <p class="text-[10px] mt-1" :class="bookingModal.draft.exchangeRateSource === 'manual' ? 'text-amber-600' : 'text-stone-400'">
+                                    <span v-if="bookingModal.draft.exchangeRateSource === 'loading'">正在抓取即時匯率...</span>
+                                    <span v-else-if="bookingModal.draft.exchangeRateSource === 'api'">已自動抓取匯率</span>
+                                    <span v-else>匯率取得失敗，請手動輸入匯率</span>
+                                </p>
+                            </div>
+                            <select v-model="bookingModal.draft.paidByMemberId" @change="onExpensePayerChange(bookingModal.draft)"
+                                class="w-full text-sm bg-white border border-stone-200 rounded-xl px-3 py-2.5 focus:ring-2 focus:ring-primary-100">
+                                <option value="">記帳付款人（同步到記帳前必填）</option>
+                                <option v-for="m in activeMembers" :key="m.id" :value="m.id">{{ m.name }}</option>
+                            </select>
+
+                            <!-- 分攤方式：同步到記帳前必須補齊，否則這筆費用只是存在訂位上的數字，不會真的進共同結算（需求 E） -->
+                            <div v-if="bookingModal.draft.syncToExpense">
+                                <div class="grid grid-cols-4 gap-1 bg-white p-1 rounded-xl border border-stone-200">
+                                    <button v-for="method in SPLIT_METHODS" :key="method.slug" type="button" @click="setSplitMethod(bookingModal.draft, method.slug)"
+                                        class="rounded-lg py-1.5 text-[10px] font-bold transition-colors"
+                                        :class="bookingModal.draft.splitMethod === method.slug ? 'bg-primary-50 text-primary-700' : 'opacity-40 text-stone-500 hover:opacity-100'">
+                                        {{ method.label }}
+                                    </button>
+                                </div>
+                                <div v-if="bookingModal.draft.splitMethod !== 'personal'" class="flex flex-wrap gap-1.5 mt-2">
+                                    <button v-for="m in activeMembers" :key="m.id" type="button" @click="toggleSplitMember(bookingModal.draft, m.id)"
+                                        class="px-3 py-1.5 rounded-full text-xs font-bold border transition"
+                                        :class="bookingModal.draft.splitAmongMemberIds.includes(m.id) ? 'bg-primary-500 border-primary-500 text-white' : 'bg-white border-stone-200 text-stone-500'">
+                                        {{ m.name }}
+                                    </button>
+                                </div>
+                                <div v-if="(bookingModal.draft.splitMethod === 'customAmount' || bookingModal.draft.splitMethod === 'customPercent') && bookingModal.draft.splitAmongMemberIds.length"
+                                    class="space-y-1.5 bg-white rounded-xl p-2 mt-2 border border-stone-200">
+                                    <div v-for="id in bookingModal.draft.splitAmongMemberIds" :key="id" class="flex items-center justify-between gap-2">
+                                        <span class="text-xs font-bold text-stone-600">{{ memberNameById(id) }}</span>
+                                        <div class="flex items-center gap-1">
+                                            <input v-model.number="bookingModal.draft.customSplits[id]" type="number" inputmode="decimal"
+                                                class="w-20 bg-stone-50 border border-stone-200 rounded-lg text-sm text-right font-mono px-2 py-1 focus:ring-2 focus:ring-primary-100">
+                                            <span class="text-xs text-stone-400 w-8">{{ bookingModal.draft.splitMethod === 'customPercent' ? '%' : bookingModal.draft.currency }}</span>
+                                        </div>
+                                    </div>
+                                    <div class="text-[11px] font-bold" :class="Math.abs(customSplitRemaining({...bookingModal.draft, amount: bookingModal.draft.cost})) > 0.01 ? 'text-red-500' : 'text-emerald-600'">
+                                        {{ Math.abs(customSplitRemaining({...bookingModal.draft, amount: bookingModal.draft.cost})) > 0.01 ? `尚差 ${customSplitRemaining({...bookingModal.draft, amount: bookingModal.draft.cost})}${bookingModal.draft.splitMethod === 'customPercent' ? '%' : ''}` : '總和已對齊' }}
+                                    </div>
+                                </div>
+                            </div>
+
+                            <label class="flex items-center gap-2 text-xs font-bold text-stone-600 pt-1">
+                                <input type="checkbox" v-model="bookingModal.draft.syncToItinerary" class="rounded">
+                                <span v-if="bookingModal.draft.type === 'flight'">同步到航班資訊 Add to flight info</span>
+                                <span v-else>同步到行程 Add to itinerary</span>
+                            </label>
+                            <label class="flex items-center gap-2 text-xs font-bold text-stone-600">
+                                <input type="checkbox" v-model="bookingModal.draft.syncToExpense" class="rounded">
+                                同步到記帳 Add to expenses
+                            </label>
+                        </div>
 
                         <textarea v-model="bookingModal.draft.notes" rows="2"
                             class="w-full text-sm text-stone-500 bg-stone-50 rounded-xl px-3 py-2.5 border-none focus:ring-2 focus:ring-primary-100 placeholder:text-stone-300 resize-none leading-relaxed"
