@@ -1,4 +1,4 @@
-const CACHE_NAME = 'asa-trip-planner-v93';
+const CACHE_NAME = 'asa-trip-planner-v94';
 const ASSETS = [
   './index.html',
   './manifest.json',
@@ -76,10 +76,13 @@ self.addEventListener('fetch', (event) => {
   }
 
   // index.html 和 manifest.json：Network First（優先拿最新版，離線時用快取）
+  // 同樣要帶 cache:'no-store'——不然 GitHub Pages 的 Cache-Control: max-age=600 會讓瀏覽器
+  // 自己的 HTTP cache 在過期前直接把舊版 index.html 生給 fetch()，SW 邏輯上是 network first
+  // 但實際上根本沒發出網路請求，等同白部署（跟 app.js 當初踩的是同一個坑，見上面 app.js 那條）。
   const isNetworkFirst = NETWORK_FIRST_PATTERNS.some(pattern => url.includes(pattern));
   if (isNetworkFirst) {
     event.respondWith(
-      fetch(event.request)
+      fetch(new Request(event.request, { cache: 'no-store' }))
         .then(response => {
           // 拿到新版後更新快取
           const clone = response.clone();
