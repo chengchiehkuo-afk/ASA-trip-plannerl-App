@@ -909,6 +909,18 @@
                                     <div v-if="loc.note" class="text-sm text-stone-600 whitespace-pre-wrap leading-relaxed">
                                         {{ loc.note }}</div>
 
+                                    <!-- 一鍵加入行程：地點本身沒有日期，所以先跳選日彈窗（見 locDayPicker），不用重打一次資料 -->
+                                    <div @click.stop>
+                                        <button v-if="isLocInItinerary(loc)" @click="removeLocFromItinerary(loc)"
+                                            class="flex items-center justify-center gap-2 w-full py-2 rounded-lg text-xs font-bold bg-emerald-50 text-emerald-700 border border-emerald-100 hover:bg-emerald-100 transition">
+                                            <i class="ph-bold ph-calendar-check"></i> 已加入行程（點此移除）
+                                        </button>
+                                        <button v-else @click="openLocDayPicker(loc)"
+                                            class="flex items-center justify-center gap-2 w-full py-2 rounded-lg text-xs font-bold bg-stone-50 text-stone-600 border border-stone-200 hover:bg-stone-100 transition">
+                                            <i class="ph-bold ph-calendar-plus"></i> 加入行程
+                                        </button>
+                                    </div>
+
                                     <!-- 旅伴偏好：地點共用，偏好各自標記，不做票數排行 -->
                                     <div class="pt-2 mt-1 border-t border-stone-50 space-y-2" @click.stop>
                                         <div v-if="activeChecklistMember" class="flex items-center gap-2 flex-wrap">
@@ -2523,6 +2535,33 @@ AS740｜SFO 10:40 → SAN 12:23
                                 <i class="ph-bold ph-check"></i> {{ locModal.mode === 'edit' ? '儲存' : '新增' }}
                             </button>
                         </div>
+                    </div>
+                </div>
+            </div>
+        </transition>
+
+        <!-- ===== 口袋名單：加入行程選日彈窗 ===== -->
+        <transition name="sheet">
+            <div v-if="locDayPicker.show" class="sheet-host absolute inset-x-0 top-0 z-[70] flex items-end justify-center">
+                <div class="absolute inset-0 bg-stone-900/40 backdrop-blur-sm" @click="locDayPicker.show = false"></div>
+                <div class="sheet-panel relative z-10 w-full bg-white rounded-t-[2rem] shadow-2xl max-h-[85%] overflow-y-auto hide-scroll"
+                    style="padding-bottom: calc(1.25rem + env(safe-area-inset-bottom))">
+                    <div class="sticky top-0 bg-white/95 backdrop-blur-sm px-5 pt-4 pb-3 border-b border-stone-100 z-10">
+                        <div class="w-10 h-1 bg-stone-200 rounded-full mx-auto mb-3"></div>
+                        <div class="flex items-center justify-between">
+                            <h3 class="text-lg font-black text-stone-800">加入行程：選一天</h3>
+                            <button @click="locDayPicker.show = false" aria-label="取消並關閉"
+                                class="w-9 h-9 rounded-full bg-stone-100 text-stone-500 flex items-center justify-center hover:bg-stone-200 transition">
+                                <i class="ph-bold ph-x"></i>
+                            </button>
+                        </div>
+                    </div>
+                    <div class="p-5 space-y-2">
+                        <button v-for="(day, dIdx) in days" :key="dIdx" @click="addLocToDay(dIdx)"
+                            class="w-full flex items-center gap-3 text-left px-4 py-3 rounded-xl bg-stone-50 hover:bg-primary-50 border border-stone-100 hover:border-primary-200 transition">
+                            <span class="font-black text-primary-600 shrink-0">Day {{ dIdx + 1 }}</span>
+                            <span class="text-sm text-stone-500 truncate">{{ day.shortDate || day.date }}<span v-if="day.title">｜{{ day.title }}</span></span>
+                        </button>
                     </div>
                 </div>
             </div>

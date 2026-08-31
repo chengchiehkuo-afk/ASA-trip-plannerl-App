@@ -1452,9 +1452,9 @@ const app = createApp({
         const saveLocModal = () => {
             if (locModal.mode === 'edit') {
                 const target = savedLocations.value.find(l => l.id === locModal.targetId);
-                // prefs 是各旅伴直接點卡片上的按鈕存的（見 setLocPref），不透過這個編輯彈窗；
-                // 排除它再 assign，避免拿彈窗打開當下的舊快照蓋掉旅伴同時按的偏好
-                if (target) { const { prefs, ...rest } = locModal.draft; Object.assign(target, rest); }
+                // prefs 是各旅伴直接點卡片上的按鈕存的（見 setLocPref），itineraryDayIdx/itineraryItemId 是加入行程按鈕存的，
+                // 兩者都不透過這個編輯彈窗；排除它們再 assign，避免拿彈窗打開當下的舊快照蓋掉旅伴同時做的操作
+                if (target) { const { prefs, itineraryDayIdx, itineraryItemId, ...rest } = locModal.draft; Object.assign(target, rest); }
             } else {
                 savedLocations.value.push({ ...locModal.draft });
             }
@@ -1464,8 +1464,45 @@ const app = createApp({
             locModal.show = false;
             const idx = savedLocations.value.findIndex(l => l.id === locModal.targetId);
             if (idx === -1) return;
+            const target = savedLocations.value[idx];
+            if (isLocInItinerary(target)) removeLocFromItinerary(target);
             const removed = savedLocations.value.splice(idx, 1)[0];
             showToast('已刪除地點', { icon: 'ph-bold ph-trash', undo: () => { savedLocations.value.splice(Math.min(idx, savedLocations.value.length), 0, removed); } });
+        };
+
+        // ---- 口袋名單一鍵加入行程：地點本身沒有日期，所以要先挑要排進哪一天；
+        // 跟「我的 ASA 議程」（isSessionInItinerary 那組）同一套 itineraryDayIdx/itineraryItemId 掛勾慣例，
+        // 差別只在 session 已經有固定日期可以直接加，口袋名單地點要跳個選日彈窗讓使用者選。----
+        const isLocInItinerary = (loc) => {
+            if (loc.itineraryDayIdx == null || !loc.itineraryItemId) return false;
+            const day = days.value[loc.itineraryDayIdx];
+            return !!(day && day.items.some(i => i.id === loc.itineraryItemId));
+        };
+        const locDayPicker = reactive({ show: false, locId: null });
+        const openLocDayPicker = (loc) => { locDayPicker.locId = loc.id; locDayPicker.show = true; };
+        const addLocToDay = (dayIdx) => {
+            const loc = savedLocations.value.find(l => l.id === locDayPicker.locId);
+            locDayPicker.show = false;
+            if (!loc) return;
+            const item = {
+                id: generateId(), time: '', type: loc.type || 'spot',
+                activity: loc.name || '未命名地點', location: '', link: loc.link || '', note: loc.note || ''
+            };
+            days.value[dayIdx].items.push(item);
+            sortItemsByTime(days.value[dayIdx].items);
+            loc.itineraryDayIdx = dayIdx;
+            loc.itineraryItemId = item.id;
+            showToast(`已加入 Day ${dayIdx + 1} 行程`, { icon: 'ph-bold ph-calendar-check' });
+        };
+        const removeLocFromItinerary = (loc) => {
+            if (loc.itineraryDayIdx == null || !loc.itineraryItemId) return;
+            const day = days.value[loc.itineraryDayIdx];
+            if (day) {
+                const idx = day.items.findIndex(i => i.id === loc.itineraryItemId);
+                if (idx !== -1) day.items.splice(idx, 1);
+            }
+            loc.itineraryDayIdx = null; loc.itineraryItemId = null;
+            showToast('已從行程移除（口袋名單裡還在）', { icon: 'ph-bold ph-calendar-x' });
         };
 
         // ---- 口袋名單偏好：地點本身共用，偏好依成員分開存在 loc.prefs[member]（不是投票/排行，只顯示各自意見）----
@@ -3318,6 +3355,7 @@ const app = createApp({
             previewTextImport, toggleAllImportRows, toggleAllFlightJourneys, confirmTextImport, undoLastImport, lastImportBatch,
             locModal, openLocModal, saveLocModal, deleteLocFromModal,
             LOC_PREF_ORDER, LOC_PREF_META, setLocPref, otherMemberPrefs, locConsensus,
+            isLocInItinerary, locDayPicker, openLocDayPicker, addLocToDay, removeLocFromItinerary,
             checklist, collapsedCats, toggleCat, checklistMembers, memberLabel, toggleCheck,
             activeChecklistMember, chooseChecklistMember,
             myChecklistProgress, checklistByCategory, seedDefaultChecklist, resetChecklist,
