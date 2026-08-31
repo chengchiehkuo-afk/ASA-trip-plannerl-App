@@ -1444,7 +1444,9 @@ const app = createApp({
                 if (!locModal.draft.type) locModal.draft.type = 'spot';
             } else {
                 locModal.mode = 'add'; locModal.targetId = null;
-                locModal.draft = { id: generateId(), name: '', type: 'spot', link: '', note: '', prefs: {} };
+                // 篩選特定類型時新增，直接帶入該類型，新地點才會立刻出現在目前畫面上
+                const defaultType = locTypeFilter.value !== 'all' ? locTypeFilter.value : 'spot';
+                locModal.draft = { id: generateId(), name: '', type: defaultType, link: '', note: '', prefs: {} };
             }
             locModal.show = true;
             if (!loc) nextTick(() => { document.querySelector('.js-loc-name')?.focus(); });
@@ -2570,6 +2572,34 @@ const app = createApp({
             const withLink = currentDayTimelineItems.value.filter(item => item && (item.link || item.location)).length;
             return Math.max(0, withLink - currentDayMapWaypoints.value.length);
         });
+        // ---- 口袋名單類型篩選：地點全擠在同一頁很難找，這裡讓使用者依類型（景點/美食/購物/交通/住宿/議程）篩選顯示。
+        // 只有「全部」時才給拖曳排序，篩選中的子集合跟底層陣列索引對不上，拖曳沒有意義也容易搞亂順序。----
+        const LOC_TYPE_META = {
+            spot: { emoji: '📍', label: '景點' },
+            food: { emoji: '🍴', label: '美食' },
+            shop: { emoji: '🛍️', label: '購物' },
+            transport: { emoji: '🚇', label: '交通' },
+            hotel: { emoji: '🛏️', label: '住宿' },
+            conference: { emoji: '🎤', label: '議程' },
+        };
+        const locTypeFilter = ref('all');
+        const pocketListTypeCounts = computed(() => {
+            const counts = {};
+            (savedLocations.value || []).forEach(loc => { const t = (loc && loc.type) || 'spot'; counts[t] = (counts[t] || 0) + 1; });
+            return counts;
+        });
+        const pocketListTypeFilters = computed(() => Object.keys(LOC_TYPE_META)
+            .filter(t => pocketListTypeCounts.value[t])
+            .map(t => ({ type: t, ...LOC_TYPE_META[t], count: pocketListTypeCounts.value[t] })));
+        const filteredSavedLocations = computed(() => {
+            if (locTypeFilter.value === 'all') return savedLocations.value;
+            return (savedLocations.value || []).filter(loc => ((loc && loc.type) || 'spot') === locTypeFilter.value);
+        });
+        // 篩選的類型被清光了（例如刪掉最後一筆）就自動退回「全部」，避免畫面卡在一個看不到任何卡片、
+        // 也點不到篩選 chip 切回去的空狀態
+        watch(pocketListTypeCounts, (counts) => {
+            if (locTypeFilter.value !== 'all' && !counts[locTypeFilter.value]) locTypeFilter.value = 'all';
+        });
         // ---- 口袋名單地圖：把整份口袋名單的地點串成一條路線內嵌顯示，方便一次比較所有候選景點彼此的
         // 地理位置，決定「這幾個離很近，可以排同一天」——跟本日地圖同一套 extractMapWaypoint／output=embed
         // 技巧。沒有貼連結時退回用地點名稱本身當查詢文字（跟 getExternalMapLink 對純文字地名的處理一樣）。
@@ -2614,8 +2644,23 @@ const app = createApp({
         const fetchWeather = async (locName) => { try { weather.value.location = locName; const geoRes = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(locName)}&limit=1`); const geoData = await geoRes.json(); if (geoData?.[0]) { const { lat, lon } = geoData[0]; const wRes = await fetch(`https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&current_weather=true&daily=temperature_2m_max,temperature_2m_min,weathercode&timezone=auto&forecast_days=16`); const wData = await wRes.json(); weather.value.temp = Math.round(wData.current_weather.temperature); weather.value.icon = getWeatherIcon(wData.current_weather.weathercode); if (wData.daily) weather.value.daily = wData.daily; } } catch (e) { weather.value.temp = '--'; } };
         // 主內容包在 <transition mode="out-in">，切到口袋分頁時容器要等舊視圖淡出後才進 DOM，
         // 所以不能只在 nextTick 找一次——輪詢等到元素出現再掛，且防重複掛載
-        const initSortable = () => { const el = document.getElementById('saved-locations-list'); if (!el) return false; if (Sortable.get && Sortable.get(el)) return true; Sortable.create(el, { animation: 150, handle: '.loc-drag-handle', ghostClass: 'sortable-ghost', dragClass: 'sortable-drag', onEnd: (evt) => { const item = savedLocations.value.splice(evt.oldIndex, 1)[0]; savedLocations.value.splice(evt.newIndex, 0, item); } }); return true; };
+        const initSortable = () => {
+            const el = document.getElementById('saved-locations-list');
+            if (!el) return false;
+            let instance = Sortable.get && Sortable.get(el);
+            if (!instance) {
+                instance = Sortable.create(el, {
+                    animation: 150, handle: '.loc-drag-handle', ghostClass: 'sortable-ghost', dragClass: 'sortable-drag',
+                    disabled: locTypeFilter.value !== 'all',
+                    onEnd: (evt) => { const item = savedLocations.value.splice(evt.oldIndex, 1)[0]; savedLocations.value.splice(evt.newIndex, 0, item); }
+                });
+            }
+            instance.option('disabled', locTypeFilter.value !== 'all');
+            return true;
+        };
         const initSortableWhenReady = () => { let tries = 0; const tryInit = () => { if (!initSortable() && ++tries < 30) setTimeout(tryInit, 100); }; nextTick(tryInit); };
+        // 篩選切換時同步更新既有 Sortable 實例的 disabled 狀態（只有「全部」允許拖曳排序）
+        watch(locTypeFilter, () => { initSortable(); });
 
         const loadTripList = () => {
             const list = localStorage.getItem('travel_app_index');
@@ -3296,6 +3341,7 @@ const app = createApp({
             getExternalMapLink, removeFlight, addDay,
             currentDayMapEmbedUrl, currentDayMapSkippedCount, currentDayMapHasShortLinks,
             pocketListMapEmbedUrl, pocketListMapHasShortLinks, pocketListMapOmittedCount,
+            locTypeFilter, pocketListTypeFilters, filteredSavedLocations,
             addFlightSegment, removeFlightSegment, moveFlightSegment, formatFlightTime, isNextDayArrival, formatLayover, layoverLabel,
             revealedFlightConfirmations, toggleFlightConfirmation, maskConfirmation,
             expenses, visibleExpenses, newExpense, totalExpense, addExpense, expenseAmountTWD,

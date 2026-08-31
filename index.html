@@ -875,8 +875,26 @@
                         </div>
                     </div>
 
+                    <!-- 類型篩選：全部擠在同一頁很難找，這裡讓使用者依類型分開看。只有沒篩選（全部）時才給拖曳排序，
+                         篩選出來的子集合位置跟底層陣列對不上，拖曳沒有意義。 -->
+                    <div v-if="pocketListTypeFilters.length" class="flex gap-2 overflow-x-auto hide-scroll -mx-1 px-1 pb-0.5">
+                        <button @click="locTypeFilter = 'all'"
+                            class="shrink-0 flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-bold border transition"
+                            :class="locTypeFilter === 'all' ? 'bg-primary-600 text-white border-primary-600 shadow-sm' : 'bg-white text-stone-500 border-stone-200 hover:border-stone-300'">
+                            全部
+                            <span class="text-[10px]" :class="locTypeFilter === 'all' ? 'text-white/70' : 'text-stone-400'">{{ savedLocations.length }}</span>
+                        </button>
+                        <button v-for="opt in pocketListTypeFilters" :key="opt.type" @click="locTypeFilter = opt.type"
+                            class="shrink-0 flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-bold border transition"
+                            :class="locTypeFilter === opt.type ? 'bg-primary-600 text-white border-primary-600 shadow-sm' : 'bg-white text-stone-500 border-stone-200 hover:border-stone-300'">
+                            <span>{{ opt.emoji }}</span> {{ opt.label }}
+                            <span class="text-[10px]" :class="locTypeFilter === opt.type ? 'text-white/70' : 'text-stone-400'">{{ opt.count }}</span>
+                        </button>
+                    </div>
+                    <p v-if="locTypeFilter !== 'all'" class="text-xs text-stone-400 pl-1 -mt-2">篩選中只能瀏覽，切回「全部」才能拖曳排序</p>
+
                     <div id="saved-locations-list" class="space-y-4">
-                        <div v-for="loc in savedLocations" :key="loc.id" :data-id="loc.id"
+                        <div v-for="loc in filteredSavedLocations" :key="loc.id" :data-id="loc.id"
                             class="location-card bg-white rounded-2xl shadow-sm border border-stone-100 transition-all relative overflow-hidden">
                             <!-- 拖曳把手（touch-none 讓 iOS 不搶手勢，是真機能拖的關鍵） -->
                             <div class="loc-drag-handle absolute left-0 top-0 bottom-0 w-8 flex items-center justify-center touch-none cursor-move text-stone-300 z-20">
